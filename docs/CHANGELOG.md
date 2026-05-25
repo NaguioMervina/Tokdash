@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.3.1 - 2026-05-25
+
+### Added
+- Added Xiaomi MiMo V2.5 pricing entries: `mimo-v2.5` (input $0.40 / output $2 per 1M) and `mimo-v2.5-pro` (input $1 / output $3 per 1M), matching OpenRouter's published rates.
+- Added a `Monthly Totals` table below the Year heatmap on the `Stats` tab, showing per-month total tokens, total cost, and total energy for the selected year (Jan through the current month for the current year; full year otherwise).
+- Added `Total Tokens` and `Energy` columns to the `Models Used` table in the Day Details panel.
+- Added click-to-navigate from the Year view to the Month view: clicking a month label above the year heatmap, or a row in the Monthly Totals table, jumps to that month.
+
+### Changed
+- Reorganized the Month Stats sidebar into a 2-column grid so the panel takes roughly half the previous vertical space.
+
+### Fixed
+- Year heatmap previous/next arrow buttons now update the title and grid immediately on click instead of waiting for the async year-stats fetch to complete, so rapid back-to-back clicks register correctly.
+
 ## 0.3.0 - 2026-05-21
 
 ### Added

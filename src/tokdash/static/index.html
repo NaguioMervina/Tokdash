@@ -1232,10 +1232,10 @@
             </div>
 
             <!-- Right: Statistics -->
-            <div class="surface p-5 lg:min-w-[280px]">
+            <div class="surface p-5 lg:min-w-[360px]">
               <h4 class="text-sm font-extrabold uppercase tracking-wider mb-4" style="color: var(--color-label);" data-i18n="monthStats">Month Stats</h4>
-              
-              <div class="space-y-4">
+
+              <div class="grid grid-cols-2 gap-x-5 gap-y-4">
                 <!-- Top model by cost -->
                 <div>
                   <div class="text-xs font-semibold text-slate-500 mb-1" data-i18n="topModelCost">Top Model (Cost)</div>
@@ -1302,6 +1302,25 @@
             <div class="heatmap-year-main">
               <div id="yearMonthLabels" class="heatmap-year-months"></div>
               <div id="yearGrid" class="heatmap-year-grid">Loading…</div>
+            </div>
+          </div>
+
+          <div class="surface p-5 mt-6">
+            <h4 class="text-sm font-extrabold uppercase tracking-wider mb-4" style="color: var(--color-label);" data-i18n="monthlyTotals">Monthly Totals</h4>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm" aria-label="Monthly totals table">
+                <thead>
+                  <tr class="border-b" style="border-color: var(--color-border);">
+                    <th class="text-left py-2 px-3 font-semibold" style="color: var(--color-muted);" data-i18n="month">Month</th>
+                    <th class="text-right py-2 px-3 font-semibold" style="color: var(--color-muted);" data-i18n="totalTokens">Total Tokens</th>
+                    <th class="text-right py-2 px-3 font-semibold" style="color: var(--color-muted);" data-i18n="totalCost">Total Cost</th>
+                    <th class="text-right py-2 px-3 font-semibold" style="color: var(--color-muted);" data-i18n="energy">Energy</th>
+                  </tr>
+                </thead>
+                <tbody id="yearMonthlyTotalsTable">
+                  <tr><td colspan="4" class="text-center py-6" style="color: var(--color-muted);" data-i18n="loading">Loading…</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -1663,6 +1682,7 @@
         less: 'Less',
         more: 'More',
         monthStats: 'Month Stats',
+        monthlyTotals: 'Monthly Totals',
         messages: 'Messages',
         dayDetails: 'Day Details',
         close: 'Close',
@@ -1812,6 +1832,7 @@
         less: '少',
         more: '多',
         monthStats: '月度统计',
+        monthlyTotals: '每月汇总',
         messages: '消息数',
         dayDetails: '日详情',
         close: '关闭',
@@ -3950,6 +3971,10 @@
         renderMonthHeatmap();
       } else if (view === 'year') {
         const year = calendarState.yearCursor.getFullYear();
+        // Render synchronously with whatever's cached (or empty) so the
+        // title and grid update immediately on prev/next click.
+        renderYearHeatmap();
+        updateTopStatsForYear();
         ensureYearStatsLoaded(year).then(() => {
           if (calendarState.view !== 'year' || calendarState.yearCursor.getFullYear() !== year) return;
           renderYearHeatmap();
@@ -4322,17 +4347,27 @@
       const totalDays = Math.floor((end - startMonday) / (24 * 3600 * 1000)) + 1;
       const weeks = Math.ceil(totalDays / 7);
 
-      // Month labels aligned to week columns
+      // Month labels aligned to week columns (clickable → jump to that month)
       const mlabelsEl = document.getElementById('yearMonthLabels');
       if (mlabelsEl) {
         const monthNames = getMonthLabels();
-        const cols = new Array(weeks).fill('');
+        const cols = new Array(weeks).fill(null);
         for (let m = 0; m < 12; m++) {
           const md = new Date(year, m, 1);
           const w = Math.floor((md - startMonday) / (24 * 3600 * 1000) / 7);
-          if (w >= 0 && w < cols.length) cols[w] = monthNames[m];
+          if (w >= 0 && w < cols.length) cols[w] = { label: monthNames[m], month: m };
         }
-        mlabelsEl.innerHTML = cols.map((t) => `<div>${t}</div>`).join('');
+        mlabelsEl.innerHTML = '';
+        cols.forEach((entry) => {
+          const cell = document.createElement('div');
+          if (entry) {
+            cell.textContent = entry.label;
+            cell.style.cursor = 'pointer';
+            cell.title = `${entry.label} ${year}`;
+            cell.addEventListener('click', () => goToMonthView(year, entry.month));
+          }
+          mlabelsEl.appendChild(cell);
+        });
       }
 
       for (let i = 0; i < weeks * 7; i++) {
@@ -4360,6 +4395,57 @@
       }
       calendarState.currentViewDays = yearDays;
       updateStatsInsights(yearDays);
+      renderYearMonthlyTotals(yearDays, year);
+    }
+
+    function renderYearMonthlyTotals(yearDays, year) {
+      const tbody = document.getElementById('yearMonthlyTotalsTable');
+      if (!tbody) return;
+
+      const monthNames = getMonthLabels();
+      const buckets = Array.from({ length: 12 }, () => ({ tokens: 0, cost: 0, energyJ: 0 }));
+
+      (yearDays || []).forEach((day) => {
+        if (!day || !day.date) return;
+        const dt = parseDateKey(day.date);
+        if (Number.isNaN(dt.getTime()) || dt.getFullYear() !== year) return;
+        const m = dt.getMonth();
+        if (day.totals) {
+          buckets[m].tokens += Number(day.totals.tokens || 0);
+          buckets[m].cost += Number(day.totals.cost || 0);
+        }
+        buckets[m].energyJ += dayEnergyJ(day);
+      });
+
+      const now = new Date();
+      const lastMonth = (now.getFullYear() === year) ? now.getMonth() : 11;
+
+      tbody.innerHTML = '';
+      for (let m = 0; m <= lastMonth; m++) {
+        const b = buckets[m];
+        const tr = document.createElement('tr');
+        tr.className = 'border-b';
+        tr.style.borderColor = 'var(--color-border)';
+        tr.style.cursor = 'pointer';
+        tr.title = `${monthNames[m]} ${year}`;
+        tr.innerHTML = `
+          <td class="py-2 px-3 font-semibold mono">${monthNames[m]}</td>
+          <td class="py-2 px-3 text-right">${formatNumber(b.tokens)}</td>
+          <td class="py-2 px-3 text-right font-semibold" style="color:var(--color-cost)">${formatCurrency(b.cost)}</td>
+          <td class="py-2 px-3 text-right">${formatEnergy(b.energyJ)}</td>
+        `;
+        tr.addEventListener('click', () => goToMonthView(year, m));
+        tbody.appendChild(tr);
+      }
+    }
+
+    function goToMonthView(year, month) {
+      calendarState.monthCursor = new Date(year, month, 1);
+      calendarState.yearCursor = new Date(year, 0, 1);
+      setView('month');
+      try {
+        document.getElementById('calendarMonthView').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) {}
     }
 
     function renderCalendar(contributions, options = {}) {
@@ -4439,6 +4525,8 @@
                 <tr class="border-b">
                   <th class="text-left py-2">${t('source')}</th>
                   <th class="text-left py-2">${t('model')}</th>
+                  <th class="text-right py-2">${t('totalTokens')}</th>
+                  <th class="text-right py-2">${t('energy')}</th>
                   <th class="text-right py-2">${t('cost')}</th>
                   <th class="text-right py-2">${t('msgs')}</th>
                 </tr>
@@ -4447,10 +4535,14 @@
         `;
 
         sourcesByCost.forEach((src) => {
+          const totalTokens = (src.tokens.input || 0) + (src.tokens.output || 0) + (src.tokens.cacheRead || 0) + (src.tokens.reasoning || 0);
+          const energyJ = sourceEnergyJ({ modelId: src.modelId, tokens: src.tokens });
           html += `
             <tr class="border-b">
               <td class="py-2 text-slate-700">${formatToolName(src.source)}</td>
               <td class="py-2 text-slate-800">${src.modelId}</td>
+              <td class="py-2 text-right text-slate-700">${formatNumber(totalTokens)}</td>
+              <td class="py-2 text-right text-slate-700">${formatEnergy(energyJ)}</td>
               <td class="py-2 text-right font-semibold" style="color:var(--color-cost)">${formatCurrency(src.cost)}</td>
               <td class="py-2 text-right text-slate-500">${formatNumber(src.messages)}</td>
             </tr>
