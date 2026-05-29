@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.3.3 - 2026-05-29
+
+### Added
+- Added Claude Opus 4.8 pricing entry (`claude-opus-4.8`) with the same rates as Opus 4.7 (input $5 / output $25 per 1M; cache read $0.50 / cache write $6.25), plus an `opus-4.8` shorthand alias. Names such as `claude-opus-4-8` and `opus-4.8` normalize to the canonical entry.
+
 ## 0.3.2 - 2026-05-26
 
 ### Fixed

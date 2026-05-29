@@ -115,6 +115,34 @@ def test_opus_4_7_alias_entries_resolve():
         )
 
 
+def test_opus_4_8_alias_entries_resolve():
+    """Opus 4.8 shorthand aliases must resolve to the canonical pricing."""
+    db = PricingDatabase()
+
+    representative_aliases = [
+        "opus-4.8",
+        "claude-opus-4-8",
+    ]
+    base_cost = db.get_cost("claude-opus-4.8", 1000, 2000, 0, 0)
+    assert base_cost > 0.0
+
+    for alias in representative_aliases:
+        alias_cost = db.get_cost(alias, 1000, 2000, 0, 0)
+        assert abs(alias_cost - base_cost) < 1e-12, (
+            f"Alias {alias!r} should resolve to claude-opus-4.8 pricing"
+        )
+
+
+def test_opus_4_8_matches_4_7_pricing():
+    """Opus 4.8 must price identically to Opus 4.7."""
+    db = PricingDatabase()
+
+    cost_47 = db.get_cost("claude-opus-4.7", 1000, 2000, 500, 500)
+    cost_48 = db.get_cost("claude-opus-4.8", 1000, 2000, 500, 500)
+    assert cost_48 > 0.0
+    assert abs(cost_48 - cost_47) < 1e-12, "Opus 4.8 should match Opus 4.7 pricing"
+
+
 def test_derived_antigravity_models_resolve():
     """Antigravity models must resolve and match their base model pricing."""
     db = PricingDatabase()
