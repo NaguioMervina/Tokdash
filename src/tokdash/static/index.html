@@ -305,8 +305,14 @@
     .session-table th, .session-table td { overflow: hidden; text-overflow: ellipsis; }
     .session-table th[data-sortable] { cursor: pointer; user-select: none; }
     .session-table th[data-sortable]:hover { color: var(--color-primary) !important; }
+    th[data-sortable] { cursor: pointer; user-select: none; }
+    th[data-sortable]:hover { color: var(--color-primary) !important; }
     .sort-arrow { font-size: 10px; margin-left: 2px; opacity: 0.5; }
     .sort-arrow.active { opacity: 1; }
+    /* Apps & Models: fixed layout + shared colgroup so columns line up across the
+       per-app sub-tables (each app is its own table). */
+    .apps-model-table { table-layout: fixed; min-width: 720px; }
+    .apps-model-table th, .apps-model-table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* Calendar heatmap styles - 10 levels */
     .calendar-grid {
@@ -852,10 +858,10 @@
           <table class="w-full text-sm" aria-label="Tools breakdown table">
             <thead>
               <tr class="border-b" style="border-color: var(--color-border);">
-                <th class="text-left py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="tool">Tool</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="tokens">Tokens</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="hitPct" title="Cache hit rate — prompt input served from cache">Hit %</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cost">Cost</th>
+                <th class="text-left py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="tool" data-sortable="tool">Tool</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="tokens" data-sortable="tokens">Tokens</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="hitPct" data-sortable="cache_hit_rate" title="Cache hit rate — prompt input served from cache">Hit %</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cost" data-sortable="cost">Cost</th>
               </tr>
             </thead>
             <tbody id="toolsTable">
@@ -883,14 +889,14 @@
           <table class="w-full text-sm" aria-label="Combined models table">
             <thead>
               <tr class="border-b" style="border-color: var(--color-border);">
-                <th class="text-left py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="model">Model</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="input">Input</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="output">Output</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cache">Cache</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="total">Total</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="hitPct" title="Cache hit rate — prompt input served from cache">Hit %</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cost">Cost</th>
-                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="msgs">Msgs</th>
+                <th class="text-left py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="model" data-sortable="name">Model</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="input" data-sortable="tokens_in">Input</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="output" data-sortable="tokens_out">Output</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cache" data-sortable="tokens_cache">Cache</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="total" data-sortable="tokens">Total</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="hitPct" data-sortable="cache_hit_rate" title="Cache hit rate — prompt input served from cache">Hit %</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="cost" data-sortable="cost">Cost</th>
+                <th class="text-right py-3 px-4 font-semibold" style="color: var(--color-muted);" data-i18n="msgs" data-sortable="messages">Msgs</th>
               </tr>
             </thead>
             <tbody id="allModelsTable">
@@ -1557,6 +1563,7 @@
     let lastSessionsResponses = { codex: null, claude: null, opencode: null, combined: null };
     let lastCombinedModels = [];
     let lastAppsBreakdown = null;
+    let lastByTool = {};
     let pricingDbLoaded = false;
     let pricingDbDirty = false;
     let pricingDbLastText = '';
@@ -1943,6 +1950,29 @@
       return (num ?? 0).toLocaleString(currentLang === 'zh' ? 'zh-CN' : 'en-US');
     }
 
+    // Shrink a KPI value's font-size only when its (unbreakable) number would
+    // overflow its narrow card — e.g. hundred-million+ totals under the "This
+    // Year" range. The size is reset first, so short/normal values keep their CSS
+    // size and the usual view is unchanged. No-op while the card is hidden
+    // (clientWidth 0); re-fit when the Overview tab is shown or the window resizes.
+    function fitKpiValue(el) {
+      if (!el) return;
+      el.style.whiteSpace = 'nowrap';
+      el.style.fontSize = '';
+      if (!el.clientWidth) return;
+      let size = parseFloat(getComputedStyle(el).fontSize) || 0;
+      let guard = 0;
+      while (size > 14 && el.scrollWidth > el.clientWidth && guard < 40) {
+        size -= 1;
+        el.style.fontSize = size + 'px';
+        guard += 1;
+      }
+    }
+
+    function fitOverviewKpis() {
+      ['totalTokens', 'totalCost', 'totalMessages'].forEach((id) => fitKpiValue(document.getElementById(id)));
+    }
+
     // Format currency
     function formatCurrency(num) {
       const n = Number(num ?? 0);
@@ -2263,6 +2293,16 @@
         const key = el.getAttribute('data-i18n-title');
         el.setAttribute('title', t(key));
       });
+      // Re-translating data-i18n headers above replaces their textContent, which
+      // drops the child sort-arrow span; restore the active-sort indicator on the
+      // breakdown tables (their headers carry data-i18n, unlike the regenerated
+      // Apps & Models sub-tables).
+      if (typeof breakdownSortState !== 'undefined') {
+        [['toolsTable', 'tools'], ['allModelsTable', 'combined']].forEach(([id, key]) => {
+          const tbl = document.getElementById(id)?.closest('table');
+          if (tbl) renderBreakdownSortArrows(tbl, breakdownSortState[key]);
+        });
+      }
       const langBtn = document.getElementById('langToggle');
       if (langBtn) langBtn.textContent = currentLang === 'zh' ? 'EN' : '中';
       renderRefreshButton();
@@ -2605,6 +2645,7 @@
       document.getElementById('totalTokens').textContent = formatNumber(data.total_tokens);
       document.getElementById('totalCost').textContent = formatCurrency(data.total_cost);
       document.getElementById('totalMessages').textContent = formatNumber(data.total_messages || 0);
+      fitOverviewKpis();
       const hitEl = document.getElementById('avgCacheHitRate');
       if (hitEl) hitEl.textContent = formatHitRate(data.cache_hit_rate);
       const hitMeta = document.getElementById('avgCacheHitMeta');
@@ -2622,7 +2663,8 @@
 
       updateToolChart(data.by_tool || {});
       updateModelChart(data.top_models || []);
-      updateToolsTable(data.by_tool || {});
+      lastByTool = data.by_tool || {};
+      updateToolsTable(lastByTool);
       lastCombinedModels = data.combined_models || [];
       lastAppsBreakdown = { apps: data.apps || null, openclawModels: data.openclaw_models || null };
 
@@ -3404,33 +3446,104 @@
     }
 
     // Tools table
+    // --- Breakdown table sorting (Tools / Apps & Models / Combined) ---
+    // Mirrors the Sessions ranking: click a column header to sort, click again to
+    // flip direction. Numeric columns start high→low (a rank), text columns A→Z.
+    const breakdownSortState = {
+      tools: { field: 'tokens', direction: 'desc' },
+      apps: { field: 'cost', direction: 'desc' },
+      combined: { field: 'cost', direction: 'desc' },
+    };
+    const BREAKDOWN_NUMERIC_FIELDS = new Set(['tokens_in', 'tokens_out', 'tokens_cache', 'tokens', 'cost', 'messages', 'cache_hit_rate']);
+
+    function getBreakdownComparator(field, direction) {
+      const dir = direction === 'asc' ? 1 : -1;
+      if (BREAKDOWN_NUMERIC_FIELDS.has(field)) {
+        return (a, b) => (Number(a[field] || 0) - Number(b[field] || 0)) * dir;
+      }
+      return (a, b) => String(a[field] || '').localeCompare(String(b[field] || '')) * dir;
+    }
+
+    function renderBreakdownSortArrows(table, state) {
+      table.querySelectorAll('th[data-sortable]').forEach((th) => {
+        const field = th.getAttribute('data-sortable');
+        let arrow = th.querySelector('.sort-arrow');
+        if (!arrow) {
+          arrow = document.createElement('span');
+          arrow.className = 'sort-arrow';
+          th.appendChild(arrow);
+        }
+        if (state && state.field === field) {
+          arrow.textContent = state.direction === 'asc' ? ' ▲' : ' ▼';
+          arrow.classList.add('active');
+        } else {
+          arrow.textContent = '';
+          arrow.classList.remove('active');
+        }
+      });
+    }
+
+    // Wire a table's sortable headers to breakdownSortState[stateKey] and re-render
+    // on click. Safe to call on every render: persistent tables (Tools/Combined)
+    // are guarded against duplicate listeners via dataset.sortInit, while the
+    // regenerated Apps & Models sub-tables get fresh handlers each render.
+    function setupBreakdownSort(table, stateKey, rerenderFn) {
+      if (!table) return;
+      renderBreakdownSortArrows(table, breakdownSortState[stateKey]);
+      if (table.dataset.sortInit) return;
+      table.dataset.sortInit = '1';
+      table.querySelectorAll('th[data-sortable]').forEach((th) => {
+        th.addEventListener('click', () => {
+          const field = th.getAttribute('data-sortable');
+          const prev = breakdownSortState[stateKey];
+          if (prev && prev.field === field) {
+            breakdownSortState[stateKey] = { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+          } else {
+            breakdownSortState[stateKey] = { field, direction: BREAKDOWN_NUMERIC_FIELDS.has(field) ? 'desc' : 'asc' };
+          }
+          rerenderFn();
+        });
+      });
+    }
+
     function updateToolsTable(byTool) {
       const tbody = document.getElementById('toolsTable');
       if (!tbody) return;
 
-      const visibleTools = Object.entries(byTool || {}).filter(([, data]) => Number(data?.tokens || 0) > 0);
+      const table = tbody.closest('table');
+      if (table) setupBreakdownSort(table, 'tools', () => updateToolsTable(lastByTool));
 
-      if (visibleTools.length === 0) {
+      const rows = Object.entries(byTool || {})
+        .filter(([, data]) => Number(data?.tokens || 0) > 0)
+        .map(([tool, data]) => ({
+          tool,
+          tokens: Number(data.tokens || 0),
+          cache_hit_rate: data.cache_hit_rate,
+          cost: Number(data.cost || 0),
+        }));
+
+      if (rows.length === 0) {
         const row = document.createElement('tr');
         row.innerHTML = `<td colspan="4" class="text-center py-10" style="color: var(--color-muted);">${t('noData')}</td>`;
         tbody.replaceChildren(row);
         return;
       }
 
-      visibleTools.sort((a, b) => Number(b[1].tokens || 0) - Number(a[1].tokens || 0));
+      const st = breakdownSortState.tools;
+      rows.sort(getBreakdownComparator(st.field, st.direction));
 
       const frag = document.createDocumentFragment();
-      visibleTools.forEach(([tool, data]) => {
-        const row = document.createElement('tr');
-        row.className = 'border-b hover:bg-slate-50 transition';
-        row.style.borderColor = 'rgba(226,232,240,0.9)';
-        row.innerHTML = `
-          <td class="py-3 px-4 font-semibold text-slate-800">${formatToolName(tool)}</td>
-          <td class="py-3 px-4 text-right text-slate-700">${formatNumber(data.tokens)}</td>
-          <td class="py-3 px-4 text-right text-slate-700">${formatHitRate(data.cache_hit_rate)}</td>
-          <td class="py-3 px-4 text-right font-bold" style="color:var(--color-cost)">${formatCurrency(data.cost)}</td>
+      rows.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b hover:bg-slate-50 transition';
+        tr.style.borderColor = 'rgba(226,232,240,0.9)';
+        tr.innerHTML = `
+          <td class="py-3 px-4 font-semibold text-slate-800">${formatToolName(row.tool)}</td>
+          <td class="py-3 px-4 text-right text-slate-700">${formatNumber(row.tokens)}</td>
+          <td class="py-3 px-4 text-right text-slate-700">${formatHitRate(row.cache_hit_rate)}</td>
+          <td class="py-3 px-4 text-right font-bold" style="color:var(--color-cost)">${formatCurrency(row.cost)}</td>
         `;
-        frag.appendChild(row);
+        frag.appendChild(tr);
       });
 
       tbody.replaceChildren(frag);
@@ -3478,9 +3591,13 @@
         return;
       }
 
+      const modelSort = breakdownSortState.apps;
+      const rerenderApps = () => updateAppsBreakdown(lastAppsBreakdown?.apps || null, lastAppsBreakdown?.openclawModels || null);
+
       sortedApps.forEach(([appName, appData]) => {
         const visibleModels = (appData.models || []).filter(hasModelTokenUsage);
         if (visibleModels.length === 0) return;
+        visibleModels.sort(getBreakdownComparator(modelSort.field, modelSort.direction));
 
         const appDiv = document.createElement('div');
         appDiv.className = 'mb-6';
@@ -3501,18 +3618,21 @@
         appDiv.appendChild(header);
 
         const table = document.createElement('table');
-        table.className = 'w-full text-sm';
+        table.className = 'w-full text-sm apps-model-table';
         table.innerHTML = `
+          <colgroup>
+            <col style="width:28%"><col style="width:10%"><col style="width:10%"><col style="width:12%"><col style="width:12%"><col style="width:8%"><col style="width:11%"><col style="width:9%">
+          </colgroup>
           <thead>
             <tr class="border-b bg-slate-50">
-              <th class="text-left py-2 px-3 font-semibold text-slate-600">${t('model')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('input')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('output')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('cache')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('total')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('hitPct')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('cost')}</th>
-              <th class="text-right py-2 px-3 font-semibold text-slate-600">${t('msgs')}</th>
+              <th class="text-left py-2 px-3 font-semibold text-slate-600" data-sortable="name">${t('model')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="tokens_in">${t('input')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="tokens_out">${t('output')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="tokens_cache">${t('cache')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="tokens">${t('total')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="cache_hit_rate">${t('hitPct')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="cost">${t('cost')}</th>
+              <th class="text-right py-2 px-3 font-semibold text-slate-600" data-sortable="messages">${t('msgs')}</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -3523,7 +3643,7 @@
           const row = document.createElement('tr');
           row.className = 'border-b hover:bg-slate-50 transition';
           row.innerHTML = `
-            <td class="py-2 px-3 text-slate-800">${model.name}</td>
+            <td class="py-2 px-3 text-slate-800" title="${model.name}">${model.name}</td>
             <td class="py-2 px-3 text-right text-slate-700">${formatNumber(model.tokens_in)}</td>
             <td class="py-2 px-3 text-right text-slate-700">${formatNumber(model.tokens_out)}</td>
             <td class="py-2 px-3 text-right text-slate-700">${formatNumber(model.tokens_cache)}</td>
@@ -3534,6 +3654,10 @@
           `;
           tbody.appendChild(row);
         });
+
+        // Each app sub-table is rebuilt on every render, so attach fresh sort
+        // handlers here (shared 'apps' state sorts all app tables in lockstep).
+        setupBreakdownSort(table, 'apps', rerenderApps);
 
         // Wrap table in overflow container for mobile scrolling
         const tableWrapper = document.createElement('div');
@@ -3553,7 +3677,12 @@
       const tbody = document.getElementById('allModelsTable');
       if (!tbody) return;
 
+      const table = tbody.closest('table');
+      if (table) setupBreakdownSort(table, 'combined', () => updateCombinedModelsTable(lastCombinedModels));
+
       const visibleModels = (models || []).filter(hasModelTokenUsage);
+      const st = breakdownSortState.combined;
+      visibleModels.sort(getBreakdownComparator(st.field, st.direction));
 
       const infoEl = document.getElementById('combinedModelsInfo');
       const toggleBtn = document.getElementById('combinedModelsToggle');
@@ -5039,6 +5168,7 @@
     // Keep 3D view responsive on window resize.
     let _resize3DTimer = null;
     window.addEventListener('resize', () => {
+      fitOverviewKpis();
       if (calendarState.view !== '3d') return;
       clearTimeout(_resize3DTimer);
       _resize3DTimer = setTimeout(() => render3DCalendar(getVisibleCalendarData('3d')), 120);

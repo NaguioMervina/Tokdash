@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.5.0 - 2026-05-30
+
+### Added
+- **Sortable columns in the Overview breakdown tables.** Tools Breakdown, Apps & Models Breakdown, and Combined Models now support click-to-sort on every column, mirroring the Sessions ranking: click a header to sort, click again to flip direction (numeric columns rank high→low first, the name column A→Z), with a ▲/▼ indicator on the active column. In Apps & Models all per-app sub-tables sort in lockstep, and the active-sort indicator survives a language toggle. The Combined Models list sorts before its top-N cap, so the cap reflects the chosen sort.
+
+### Fixed
+- **Apps & Models Breakdown column alignment.** Each app renders as its own table, which under auto layout sized columns independently so they did not line up across apps. The sub-tables now use a fixed layout with a shared column template, so Input/Output/Cache/… align vertically across every app (long model names ellipsize with a hover tooltip and the table scrolls horizontally on very narrow screens).
+- **Overview "Total Tokens" overflow under wide date ranges.** Large totals (e.g. hundred-million+ under "This Year") overflowed the narrow KPI card. The Total Tokens / Total Cost / Total Messages values now shrink to fit their card only when the number would actually overflow — measured against the real card width, and re-fit on resize. Normal/small values are unchanged.
+
 ## 0.4.1 - 2026-05-30
 
 ### Fixed
