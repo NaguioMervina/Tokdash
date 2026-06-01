@@ -97,10 +97,16 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 def _has_display() -> bool:
     """Best-effort check for a usable GUI session.
 
-    Returns False in headless contexts (SSH sessions, systemd/launchd services,
-    CI) so we don't try to launch a browser where there is no display to open
-    it on. ``--no-open`` remains the explicit hard override on top of this.
+    Returns False in headless contexts (CI, SSH sessions, systemd/launchd
+    services, Linux without an X11/Wayland display) so we don't try to launch
+    a browser where there is none. ``--no-open`` remains the explicit hard
+    override on top of this.
     """
+    # CI runners are headless regardless of OS. Most providers (GitHub Actions,
+    # GitLab, Travis, CircleCI, ...) set CI=true.
+    ci = os.environ.get("CI", "").strip().lower()
+    if ci and ci not in {"0", "false", "no"}:
+        return False
     # A remote shell with no local console: opening a browser is wrong here
     # even on macOS/Windows.
     if os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY"):

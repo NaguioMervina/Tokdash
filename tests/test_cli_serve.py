@@ -14,12 +14,27 @@ def test_no_open_flag_sets_true():
     assert args.no_open is True
 
 
+def test_has_display_false_in_ci(monkeypatch):
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    # CI gating is OS-independent, so even a "GUI" platform stays headless.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("CI", "true")
+    assert cli._has_display() is False
+    # An explicitly falsy CI value should not gate.
+    monkeypatch.setenv("CI", "false")
+    assert cli._has_display() is True
+
+
 def test_has_display_false_under_ssh(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
     assert cli._has_display() is False
 
 
 def test_has_display_linux_requires_display(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
@@ -31,6 +46,7 @@ def test_has_display_linux_requires_display(monkeypatch):
 
 
 def test_has_display_non_linux_assumes_gui(monkeypatch):
+    monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
