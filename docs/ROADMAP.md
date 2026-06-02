@@ -1,6 +1,16 @@
 # Tokdash Roadmap / Notes
 
-_Last updated: 2026-02-28_
+_Last updated: 2026-06-02_
+
+## History retention / durable usage store (deferred)
+Tokdash recomputes everything live from client logs, so history erodes when a client deletes its
+old logs — notably **Claude Code** and **Gemini CLI** (30-day default cleanup). **Decision
+(2026-06): use config-based retention** — keep each client's own logs by raising/disabling its
+cleanup window — rather than building an in-app snapshot store. Rationale, the full per-client
+survey, and the one-line fixes live in [`docs/HISTORY_RETENTION.md`](HISTORY_RETENTION.md). A
+fully-reviewed design for an in-app snapshot/durable store is **parked** in
+[`docs/SNAPSHOTS_PLAN.md`](SNAPSHOTS_PLAN.md), to revisit only if a client ships
+non-disable-able cleanup or multi-machine history sync becomes a goal.
 
 ## Goals
 - **Easy install**: `pip install tokdash` (no Docker on the roadmap for now).

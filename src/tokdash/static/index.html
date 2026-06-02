@@ -1233,6 +1233,12 @@
           </div>
         </div>
 
+        <!-- Loading / error state for the stats calendar (shown until the first /api/stats load succeeds) -->
+        <div id="statsStatus" class="text-center py-10" style="display:none; color: var(--color-muted);">
+          <div id="statsStatusMsg" class="font-semibold">Loading…</div>
+          <button id="statsRetryBtn" class="btn btn-primary mt-3" type="button" style="display:none;" data-i18n="retry">Retry</button>
+        </div>
+
         <!-- Month view -->
         <div id="calendarMonthView">
           <div class="flex items-center gap-3 mb-4">
@@ -1639,6 +1645,8 @@
         styleArcade: 'Arcade',
         styleStudio: 'Studio',
         loading: 'Loading…',
+        statsLoadFailed: 'Failed to load stats.',
+        retry: 'Retry',
         overview: 'Overview',
         sessionsPage: 'Sessions',
         stats: 'Stats',
@@ -1797,6 +1805,8 @@
         styleArcade: '街机',
         styleStudio: '工作室',
         loading: '加载中…',
+        statsLoadFailed: '统计数据加载失败。',
+        retry: '重试',
         overview: '概览',
         sessionsPage: '会话',
         stats: '统计',
@@ -3902,6 +3912,31 @@
       pendingYears: new Map(),
     };
 
+    let statsLoaded = false;   // true once the first /api/stats load has rendered
+    let statsLoadSeq = 0;      // guards against stale/overlapping concurrent loads
+
+    // Loading / error overlay for the stats calendar. While the first load is in
+    // flight (or after it fails), we cover the calendar so the controls can never
+    // render an empty grid, and a failed load shows a Retry button instead of a
+    // silent blank page.
+    function setStatsStatus(state) {
+      const banner = document.getElementById('statsStatus');
+      if (!banner) return;
+      if (state === 'ok') {
+        banner.style.display = 'none';
+        return; // setView() restores the active view container
+      }
+      banner.style.display = 'block';
+      ['calendarMonthView', 'calendarYearView', 'calendar3DView'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      });
+      const msg = document.getElementById('statsStatusMsg');
+      if (msg) msg.textContent = t(state === 'error' ? 'statsLoadFailed' : 'loading');
+      const retry = document.getElementById('statsRetryBtn');
+      if (retry) retry.style.display = state === 'error' ? '' : 'none';
+    }
+
     function createEmptyContribution(key) {
       return {
         date: key,
@@ -3935,9 +3970,13 @@
 
     async function loadStats(options = {}) {
       const preserveNavigation = !!options.preserveNavigation;
+      const seq = ++statsLoadSeq;
+      if (!statsLoaded) setStatsStatus('loading');
       try {
         const response = await fetch('/api/stats');
+        if (!response.ok) throw new Error('HTTP ' + response.status);
         const data = await response.json();
+        if (seq !== statsLoadSeq) return; // a newer load superseded this one
 
         const stats = data.stats || {};
         document.getElementById('statFavoriteModel').textContent = stats.favorite_model || '—';
@@ -3954,6 +3993,8 @@
         const currentYear = new Date().getFullYear();
         const currentYearRows = filledContributions.filter((day) => Number(String(day.date).slice(0, 4)) === currentYear);
         statsCache.years.set(currentYear, fillYearDays(currentYearRows, currentYear));
+        statsLoaded = true;          // must be set before renderCalendar() so setView() renders
+        setStatsStatus('ok');
         renderCalendar(filledContributions, { preserveNavigation });
         contributionsData = filledContributions;
         if (calendarState.view === 'year') {
@@ -3961,6 +4002,9 @@
         }
       } catch (error) {
         console.error('Error loading stats:', error);
+        // Only surface the error (Retry) if this is the latest load and nothing
+        // has rendered yet — a failed background refresh keeps the existing data.
+        if (seq === statsLoadSeq && !statsLoaded) setStatsStatus('error');
       }
     }
 
@@ -4166,14 +4210,20 @@
     function setView(view) {
       calendarState.view = view;
 
-      document.getElementById('calendarMonthView').style.display = view === 'month' ? 'block' : 'none';
-      document.getElementById('calendarYearView').style.display = view === 'year' ? 'block' : 'none';
-      document.getElementById('calendar3DView').style.display = view === '3d' ? 'block' : 'none';
-
       document.getElementById('viewMonth').className = view === 'month' ? 'btn btn-primary' : 'btn btn-ghost';
       document.getElementById('viewYear').className = view === 'year' ? 'btn btn-primary' : 'btn btn-ghost';
       document.getElementById('view3D').className = view === '3d' ? 'btn btn-primary' : 'btn btn-ghost';
       updateMetricControls();
+
+      // Before the first successful stats load, keep the loading/error banner up
+      // (setStatsStatus has hidden the view containers) rather than rendering an
+      // empty calendar — this is what previously looked like a blank page when the
+      // user toggled Month/Year while /api/stats was still loading or had failed.
+      if (!statsLoaded) return;
+
+      document.getElementById('calendarMonthView').style.display = view === 'month' ? 'block' : 'none';
+      document.getElementById('calendarYearView').style.display = view === 'year' ? 'block' : 'none';
+      document.getElementById('calendar3DView').style.display = view === '3d' ? 'block' : 'none';
 
       if (view === 'month') {
         renderMonthHeatmap();
@@ -5135,6 +5185,7 @@
     document.getElementById('viewMonth').addEventListener('click', () => setView('month'));
     document.getElementById('viewYear').addEventListener('click', () => setView('year'));
     document.getElementById('view3D').addEventListener('click', () => setView('3d'));
+    document.getElementById('statsRetryBtn')?.addEventListener('click', () => loadStats());
     document.getElementById('metricTokensBtn').addEventListener('click', () => setCalendarMetric('tokens'));
     document.getElementById('metricEnergyBtn').addEventListener('click', () => setCalendarMetric('energy'));
     document.getElementById('metricCostBtn').addEventListener('click', () => setCalendarMetric('cost'));

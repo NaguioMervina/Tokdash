@@ -134,6 +134,13 @@ def serve(host: str, port: int, log_level: str, open_browser: bool = True) -> No
     url_host = "localhost" if host in {"0.0.0.0", "::"} else host
     url = f"http://{url_host}:{port}"
     print(f"🚀 Starting Tokdash on {url}")
+    if os.environ.get("TOKDASH_NO_RETENTION_NOTICE", "").strip().lower() not in {"1", "true", "yes"}:
+        print(
+            "ℹ️  Note: Claude Code & Gemini CLI auto-delete sessions older than ~30 days, "
+            "which can silently shrink Tokdash's history.\n"
+            "   Keep full history → https://github.com/JingbiaoMei/tokdash#history-retention\n"
+            "   Silence this notice with TOKDASH_NO_RETENTION_NOTICE=1"
+        )
     # Open the browser only when explicitly enabled (--no-open is a hard
     # override) and a GUI is actually available. Fire it from a short-delay
     # daemon timer so the server has a moment to start listening first.

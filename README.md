@@ -34,6 +34,9 @@
   <b>Try it without installing → <a href="https://tokdash.github.io/demo/">tokdash.github.io/demo</a></b>
 </p>
 
+> [!IMPORTANT]
+> **Keep your history:** Claude Code and Gemini CLI delete local sessions older than ~30 days by default, so Tokdash's earlier months can silently shrink — a one-line config change per client prevents it ([History retention](#history-retention)).
+
 ## Table of Contents
 
 - [Live demo](#live-demo)
@@ -231,6 +234,7 @@ Tokdash is **localhost-only by default**.
 - `TOKDASH_CACHE_TTL` (default: `120` seconds)
 - `TOKDASH_ALLOW_ORIGINS` (comma-separated, default: empty)
 - `TOKDASH_ALLOW_ORIGIN_REGEX` (default allows only localhost/127.0.0.1)
+- `TOKDASH_NO_RETENTION_NOTICE` (set to `1` to silence the history-retention reminder printed on `tokdash serve`)
 
 Example (remote access via Tailscale Serve; recommended):
 
@@ -271,19 +275,18 @@ Token counts depend on what each client logs locally. Costs are computed from `s
 
 ## History retention
 
-Tokdash reports usage by reading each client's **local** session logs — it keeps no store of its own. If a client deletes its old logs, those numbers disappear from Tokdash too, so a past month can read **lower than when you first recorded it**.
+Tokdash reads each client's **local** session logs and keeps no store of its own, so if a client deletes its old logs, that usage disappears from Tokdash too — a past month can read **lower than when you first recorded it**. Only two supported clients do this by default, and both are a one-line fix:
 
-The most common case is **Claude Code**, which deletes session transcripts older than `cleanupPeriodDays` (**default: 30 days**) on startup. Sessions you never return to are pruned once they age past that window (continuing a session — sending a new message — bumps its file's timestamp, so actively-used ones survive). To keep full history, **add** this key to your existing `~/.claude/settings.json` (don't replace the file) — and to any alternate `CLAUDE_CONFIG_DIR` you use:
+- **Claude Code** deletes sessions older than `cleanupPeriodDays` (**default 30 days**) at startup. Add this to your existing `~/.claude/settings.json` (and any alternate `CLAUDE_CONFIG_DIR`):
+  ```json
+  { "cleanupPeriodDays": 3650 }
+  ```
+- **Gemini CLI** deletes sessions older than 30 days. Disable it in `~/.gemini/settings.json`; if a project has `.gemini/settings.json`, make the same change there because workspace settings override user settings:
+  ```json
+  { "general": { "sessionRetention": { "enabled": false } } }
+  ```
 
-```json
-{
-  "cleanupPeriodDays": 3650
-}
-```
-
-This setting also governs cleanup of orphaned subagent worktrees, so a very large value keeps those around too — harmless in practice, but pick a window that comfortably exceeds the history you care about.
-
-> Other clients have their own retention behavior; when in doubt, back up the relevant log directory (e.g. `~/.claude/projects/`) if long-term history matters to you.
+Every other supported client keeps history indefinitely by default. For the full per-client survey, fix details, and why Tokdash doesn't ship its own snapshot store, see **[docs/HISTORY_RETENTION.md](docs/HISTORY_RETENTION.md)**.
 
 ## Roadmap
 

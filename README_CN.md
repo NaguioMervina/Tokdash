@@ -34,6 +34,9 @@
   <b>无需安装即可体验 → <a href="https://tokdash.github.io/demo/">tokdash.github.io/demo</a></b>
 </p>
 
+> [!IMPORTANT]
+> **保留你的历史：** Claude Code 与 Gemini CLI 默认会删除超过约 30 天的本地会话，因此 Tokdash 早期月份的统计可能会悄悄变少——每个客户端改一行配置即可避免（[历史数据保留](#历史数据保留)）。
+
 ## 目录
 
 - [功能特性](#功能特性)
@@ -230,6 +233,7 @@ Tokdash 默认**只监听 localhost**。
 - `TOKDASH_CACHE_TTL`（默认：`120` 秒）
 - `TOKDASH_ALLOW_ORIGINS`（逗号分隔，默认：空）
 - `TOKDASH_ALLOW_ORIGIN_REGEX`（默认仅允许 localhost/127.0.0.1）
+- `TOKDASH_NO_RETENTION_NOTICE`（设为 `1` 可静默 `tokdash serve` 启动时打印的历史保留提醒）
 
 示例（通过 Tailscale Serve 远程访问，推荐）：
 
@@ -271,19 +275,18 @@ Token 统计依赖各客户端本地记录的内容。费用由 `src/tokdash/pri
 
 ## 历史数据保留
 
-Tokdash 通过读取各客户端的**本地**会话日志来统计用量，自身不保存任何副本。因此一旦客户端删除了旧日志，这些数据也会从 Tokdash 中消失——过去某个月的统计**可能比你最初记录时更低**。
+Tokdash 通过读取各客户端的**本地**会话日志来统计用量，自身不保存任何副本。因此一旦客户端删除了旧日志，这些数据也会从 Tokdash 中消失——过去某个月的统计**可能比你最初记录时更低**。只有两个受支持的客户端会默认这样做，且都只需改一行配置：
 
-最常见的是 **Claude Code**：它会在启动时删除超过 `cleanupPeriodDays`（**默认 30 天**）的会话记录。那些你不再继续使用的会话，一旦超过该时间窗就会被清理（继续某个会话——即发送新消息——会刷新其文件时间，因此活跃使用的会话得以保留）。若需保留完整历史，请把这个键**添加**到你现有的 `~/.claude/settings.json` 中（不要整体替换该文件）——以及你使用的任何其他 `CLAUDE_CONFIG_DIR` 配置：
+- **Claude Code** 会在启动时删除超过 `cleanupPeriodDays`（**默认 30 天**）的会话。请把这个键添加到你现有的 `~/.claude/settings.json`（以及任何其他 `CLAUDE_CONFIG_DIR`）：
+  ```json
+  { "cleanupPeriodDays": 3650 }
+  ```
+- **Gemini CLI** 会删除超过 30 天的会话。在 `~/.gemini/settings.json` 中关闭它；如果某个项目有 `.gemini/settings.json`，也要同步修改，因为工作区设置会覆盖用户设置：
+  ```json
+  { "general": { "sessionRetention": { "enabled": false } } }
+  ```
 
-```json
-{
-  "cleanupPeriodDays": 3650
-}
-```
-
-该设置同时也控制孤立 subagent worktree 的清理，因此设得过大也会让这些 worktree 长期保留——实际影响不大，但建议选一个足够覆盖你统计需求的时间窗即可。
-
-> 其他客户端各有自己的保留策略；如果长期历史对你很重要，建议备份相关日志目录（例如 `~/.claude/projects/`）。
+其他所有受支持的客户端默认都会无限期保留历史。完整的逐客户端清单、配置细节，以及 Tokdash 为何不内置快照存储，详见 **[docs/HISTORY_RETENTION.md](docs/HISTORY_RETENTION.md)**。
 
 ## 路线图
 

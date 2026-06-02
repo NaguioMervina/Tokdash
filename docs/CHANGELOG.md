@@ -6,12 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.5.2 - 2026-06-02
+
 ### Added
 - **Install button for the PWA.** When the dashboard is installable (Chromium browsers, served with the manifest + service worker), an **Install** button appears in the header toolbar so you can pin Tokdash as a desktop/mobile app in one click. It hides itself automatically when the app is already installed or when the browser exposes no install prompt (e.g. iOS Safari).
+- **History-retention guidance.** The README now warns that Claude Code and Gemini CLI delete local sessions older than about 30 days by default, `tokdash serve` prints a one-time reminder with `TOKDASH_NO_RETENTION_NOTICE=1` as an escape hatch, and `docs/HISTORY_RETENTION.md` records the per-client retention survey plus the config-based fix.
 
 ### Changed
 - Renamed the **pi-agent** client to **Pi** across the dashboard and docs. The detection path (`~/.pi/agent/sessions/`) and the `PI_AGENT_DIR` override are unchanged — this is a display-name change only.
 - README (English + 中文): added an agent logo strip under the tagline and moved the detailed client list + log paths to [`docs/SUPPORTED_CLIENTS.md`](SUPPORTED_CLIENTS.md). Demo links now point at `tokdash.github.io/demo/` (the root `tokdash.github.io` is the project home page).
+- Deferred the in-app snapshot-store design in favor of keeping each client's own logs, with the full design retained in `docs/SNAPSHOTS_PLAN.md` for future revisit if client retention policies change.
+
+### Fixed
+- **Stats tab first-load blank state.** A slow or interrupted first `/api/stats` request could leave the Stats tab showing all-zero summary values and empty calendars, and clicking Month/Year during the failed load made the blank state look permanent. The calendar now shows a loading/error banner with Retry, ignores stale overlapping stats responses, and avoids rendering empty grids until the first successful stats load.
 
 ## 0.5.1 - 2026-06-01
 
