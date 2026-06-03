@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.5.3 - 2026-06-03
+
+### Changed
+- Updated `src/tokdash/pricing_db.json` from pricing DB `2.0.5` to `2.0.7` (`lastUpdated: 2026-06-02T22:39:42Z`). This adds 59 model pricing entries from the pricing-updater proposal, including new Anthropic fast variants, MiniMax M3, GLM vision/exacto entries, OpenAI `gpt-5.5-pro` / `gpt-chat-latest`, additional Gemini/Gemma, Mistral, Qwen, Perplexity Sonar, xAI Grok, Cohere, Baidu, Reka, StepFun, and Tencent models.
+
 ## 0.5.2 - 2026-06-02
 
 ### Added
