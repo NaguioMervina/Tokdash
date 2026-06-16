@@ -9,9 +9,21 @@ from typing import Any, Dict, List, Optional
 
 try:
     from ..pricing import PricingDatabase
+    from ..usage_store import (
+        UsageEntryStore,
+        build_source_signature,
+        parser_code_signature,
+        persistent_usage_db_enabled,
+    )
 except ImportError:  # pragma: no cover
     # Allow importing when running this code from the repo by file path.
     from pricing import PricingDatabase
+    UsageEntryStore = None  # type: ignore
+    build_source_signature = None  # type: ignore
+    parser_code_signature = None  # type: ignore
+
+    def persistent_usage_db_enabled() -> bool:  # type: ignore
+        return False
 
 
 def _cache_hit_rate(tokens_in: Any, tokens_cache: Any) -> Optional[float]:
@@ -208,6 +220,7 @@ def _parse_entries(files: list[str]) -> List[Dict[str, Any]]:
                     "output": output,
                     "cache_read": cache_read,
                     "payload_cost": _usage_cost_from_payload(usage),
+                    "entry_id": f"openclaw:{entry_id}" if entry_id else f"openclaw:{filepath}:{len(out)}",
                 }
             )
     return out
@@ -225,6 +238,156 @@ def _collect_entries(session_dirs: list[str]) -> List[Dict[str, Any]]:
         _ENTRY_CACHE.clear()
     _ENTRY_CACHE[sig] = entries
     return entries
+
+
+def _pricing_signature(pricing_db: PricingDatabase) -> tuple:
+    try:
+        s = pricing_db.db_path.stat()
+        return (s.st_mtime_ns, s.st_size)
+    except (FileNotFoundError, OSError, AttributeError):
+        return ()
+
+
+def _normalized_entry(entry: Dict[str, Any], pricing_db: PricingDatabase) -> Dict[str, Any]:
+    msg_dt = entry["msg_dt"]
+    if msg_dt.tzinfo is None:
+        msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+
+    model = str(entry["model"] or "unknown")
+    tokens_input_raw = _i(entry.get("input_raw"))
+    tokens_cache_write = _i(entry.get("cache_write"))
+    tokens_out = _i(entry.get("output"))
+    tokens_cache_read = _i(entry.get("cache_read"))
+
+    cost_db = pricing_db.get_cost(model, tokens_input_raw, tokens_out, tokens_cache_read, tokens_cache_write)
+    cost = cost_db if cost_db > 0.0 else float(entry.get("payload_cost", 0.0) or 0.0)
+    if "/" in model:
+        provider, model_id = model.split("/", 1)
+    else:
+        provider, model_id = "", model
+
+    return {
+        "source": "openclaw",
+        "model": model,
+        "provider": provider,
+        "input": tokens_input_raw,
+        "output": tokens_out,
+        "cacheRead": tokens_cache_read,
+        "cacheWrite": tokens_cache_write,
+        "reasoning": 0,
+        "cost": cost,
+        "timestamp": int(msg_dt.astimezone(timezone.utc).timestamp() * 1000),
+        "messageCount": 1,
+        "modelId": model_id,
+        "entry_id": entry.get("entry_id", ""),
+    }
+
+
+def _collect_normalized_entries(
+    session_dirs: list[str],
+    pricing_db: PricingDatabase,
+    since_date: Optional[datetime] = None,
+    until_date: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    if persistent_usage_db_enabled() and UsageEntryStore is not None:
+        try:
+            store = _sync_openclaw_store(session_dirs, pricing_db)
+            return store.query_entries(sources=["openclaw"], since=since_date, until=until_date)
+        except Exception:
+            pass
+
+    return [_normalized_entry(e, pricing_db) for e in _collect_entries(session_dirs)]
+
+
+def _sync_openclaw_store(session_dirs: list[str], pricing_db: PricingDatabase) -> UsageEntryStore:
+    files = _session_files(session_dirs)
+    sig = _signature(files)
+    store = UsageEntryStore()
+    signature = build_source_signature(  # type: ignore[misc]
+        files=sig,
+        pricing=_pricing_signature(pricing_db),
+        parser=parser_code_signature(_collect_normalized_entries),  # type: ignore[misc]
+    )
+    store.sync_source(
+        "openclaw",
+        signature,
+        lambda: (_normalized_entry(e, pricing_db) for e in _collect_entries(session_dirs)),
+    )
+    return store
+
+
+def _openclaw_usage_from_store(
+    store: UsageEntryStore,
+    since_date: Optional[datetime],
+    until_date: Optional[datetime],
+) -> Dict[str, Any]:
+    where, args = store._where(sources=["openclaw"], since=since_date, until=until_date)  # type: ignore[attr-defined]
+    query = """
+        SELECT
+            model,
+            SUM(input) AS input_sum,
+            SUM(output) AS output_sum,
+            SUM(cache_read) AS cache_read_sum,
+            SUM(cache_write) AS cache_write_sum,
+            SUM(cost) AS cost_sum,
+            SUM(message_count) AS message_count_sum
+        FROM usage_entries
+    """
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " GROUP BY model"
+
+    conn = store._connect()  # type: ignore[attr-defined]
+    try:
+        rows = conn.execute(query, args).fetchall()
+    finally:
+        conn.close()
+
+    models: Dict[str, Any] = {}
+    total_tokens = 0
+    total_cost = 0.0
+    total_messages = 0
+    total_tokens_in = 0
+    total_tokens_cache = 0
+
+    for row in rows:
+        model = str(row["model"] or "unknown")
+        input_raw = int(row["input_sum"] or 0)
+        cache_write = int(row["cache_write_sum"] or 0)
+        tokens_in = input_raw + cache_write
+        tokens_out = int(row["output_sum"] or 0)
+        tokens_cache = int(row["cache_read_sum"] or 0)
+        tokens = tokens_in + tokens_out + tokens_cache
+        cost = float(row["cost_sum"] or 0.0)
+        messages = int(row["message_count_sum"] or 0)
+        if tokens == 0:
+            continue
+
+        models[model] = {
+            "tokens": tokens,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_cache": tokens_cache,
+            "cost": cost,
+            "messages": messages,
+            "cache_hit_rate": _cache_hit_rate(tokens_in, tokens_cache),
+        }
+        total_tokens += tokens
+        total_cost += cost
+        total_messages += messages
+        total_tokens_in += tokens_in
+        total_tokens_cache += tokens_cache
+
+    return {
+        "total_tokens": int(total_tokens),
+        "total_cost": float(total_cost),
+        "total_messages": int(total_messages),
+        "total_tokens_in": int(total_tokens_in),
+        "total_tokens_cache": int(total_tokens_cache),
+        "cache_hit_rate": _cache_hit_rate(total_tokens_in, total_tokens_cache),
+        "models": models,
+        "contributions": store.contribution_days(sources=["openclaw"], since=since_date, until=until_date),
+    }
 
 
 def get_session_usage(
@@ -271,27 +434,34 @@ def get_session_usage(
     total_messages = 0
 
     session_dirs = sessions_dir if isinstance(sessions_dir, list) else [sessions_dir]
-    entries = _collect_entries(session_dirs)
+    if persistent_usage_db_enabled() and UsageEntryStore is not None:
+        try:
+            return _openclaw_usage_from_store(_sync_openclaw_store(session_dirs, pricing_db), since_date, until_date)
+        except Exception:
+            pass
+
+    entries = _collect_normalized_entries(session_dirs, pricing_db, since_date, until_date)
 
     for e in entries:
-        msg_dt = e["msg_dt"]
+        ts_ms = int(e.get("timestamp", 0) or 0)
+        if ts_ms <= 0:
+            continue
+        msg_dt = datetime.fromtimestamp(ts_ms / 1000, timezone.utc)
         if since_date and msg_dt < since_date:
             continue
         if until_date and msg_dt > until_date:
             continue
 
-        model = e["model"]
-        tokens_input_raw = e["input_raw"]
-        tokens_cache_write = e["cache_write"]
+        model = str(e.get("model") or "unknown")
+        tokens_input_raw = _i(e.get("input"))
+        tokens_cache_write = _i(e.get("cacheWrite"))
         tokens_in = tokens_input_raw + tokens_cache_write
 
-        tokens_out = e["output"]
-        tokens_cache_read = e["cache_read"]
+        tokens_out = _i(e.get("output"))
+        tokens_cache_read = _i(e.get("cacheRead"))
         tokens_cache = tokens_cache_read
         tokens_total = tokens_in + tokens_out + tokens_cache
-        # Prefer recomputed cost from local pricing DB (fall back to provider payload).
-        cost_db = pricing_db.get_cost(model, tokens_input_raw, tokens_out, tokens_cache_read, tokens_cache_write)
-        cost = cost_db if cost_db > 0.0 else e["payload_cost"]
+        cost = float(e.get("cost", 0.0) or 0.0)
         msg_date = msg_dt.astimezone().strftime("%Y-%m-%d")
 
         total_messages += 1

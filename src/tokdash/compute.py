@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .dateutil import parse_date_range
@@ -14,6 +16,12 @@ from .sources.openclaw import get_usage_for_month as get_session_usage_month
 from .sources.openclaw import get_usage_for_range as get_session_usage_range
 from .sources.openclaw import get_usage_for_year as get_session_usage_year
 from .sources.coding_tools import CodingToolsUsageTracker
+from .usage_store import (
+    UsageEntryStore,
+    build_source_signature,
+    parser_code_signature,
+    persistent_usage_db_enabled,
+)
 
 
 # ============================================================
@@ -62,10 +70,269 @@ def _date_range_from_args(period_args: list[str]) -> tuple[Optional[datetime], O
     return since, until
 
 
+def _usage_store_sources(tracker: CodingToolsUsageTracker) -> list[str]:
+    return [
+        name
+        for name, parser in tracker.parsers.items()
+        if getattr(parser, "sync_capability").mode != "source_native_db"
+    ]
+
+
+def _usage_store_live_sources(tracker: CodingToolsUsageTracker) -> list[str]:
+    return [
+        name
+        for name, parser in tracker.parsers.items()
+        if getattr(parser, "sync_capability").mode == "source_native_db"
+    ]
+
+
+def _collect_parser_file(parser: Any, file_sig: tuple[str, int, int]) -> list[dict[str, Any]]:
+    original_file_signatures = parser._file_signatures
+    try:
+        parser._file_signatures = lambda: (file_sig,)
+        return parser._parse_all()
+    finally:
+        parser._file_signatures = original_file_signatures
+
+
+def _complete_jsonl_tail(path: str, start_offset: int) -> tuple[str, int]:
+    with open(path, "rb") as handle:
+        handle.seek(max(0, int(start_offset)))
+        data = handle.read()
+    if not data:
+        return "", int(start_offset)
+    last_newline = data.rfind(b"\n")
+    if last_newline < 0:
+        return "", int(start_offset)
+    safe_offset = int(start_offset) + last_newline + 1
+    return data[: last_newline + 1].decode("utf-8"), safe_offset
+
+
+def _collect_parser_tail(parser: Any, file_sig: tuple[str, int, int], start_offset: int) -> tuple[list[dict[str, Any]], int]:
+    path = file_sig[0]
+    if not str(path).endswith(".jsonl"):
+        raise ValueError("tail append is only enabled for JSONL files")
+    text, safe_offset = _complete_jsonl_tail(path, start_offset)
+    if not text:
+        return [], safe_offset
+
+    tmp_path = None
+    original_file_signatures = parser._file_signatures
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=Path(path).suffix, delete=False) as handle:
+            handle.write(text)
+            tmp_path = handle.name
+        stat = Path(tmp_path).stat()
+        parser._file_signatures = lambda: ((str(tmp_path), int(stat.st_mtime_ns), int(stat.st_size)),)
+        return parser._parse_all(), safe_offset
+    finally:
+        parser._file_signatures = original_file_signatures
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _sync_usage_store(tracker: CodingToolsUsageTracker) -> tuple[UsageEntryStore, list[str]]:
+    store = UsageEntryStore()
+    selected = _usage_store_sources(tracker)
+    for name in selected:
+        parser = tracker.parsers[name]
+        capability = getattr(parser, "sync_capability")
+        files = parser._file_signatures()
+        pricing = parser._pricing_signature()
+        parser_sig = parser_code_signature(parser)
+        if capability.mode == "file_replace":
+            store.sync_files(
+                name,
+                files,
+                pricing=pricing,
+                parser=parser_sig,
+                parse_file_entries=lambda file_sig, parser=parser: _collect_parser_file(parser, file_sig),
+                parse_file_tail_entries=(
+                    (lambda file_sig, start_offset, parser=parser: _collect_parser_tail(parser, file_sig, start_offset))
+                    if capability.append_jsonl
+                    else None
+                ),
+            )
+            continue
+        if capability.mode != "source_replace":
+            continue
+        signature = build_source_signature(
+            files=files,
+            pricing=pricing,
+            parser=parser_sig,
+        )
+        store.sync_source(
+            name,
+            signature,
+            lambda parser=parser: parser.collect(None, None),
+        )
+    return store, selected
+
+
+def _collect_live_coding_entries(
+    tracker: CodingToolsUsageTracker,
+    since: Optional[datetime],
+    until: Optional[datetime],
+    sources: list[str],
+) -> list[dict[str, Any]]:
+    if not sources:
+        return []
+    tracker.collect(since, until, sources)
+    return tracker.to_json().get("entries", [])
+
+
+def _merge_parsed_usage(parts: list[Dict[str, Any]]) -> Dict[str, Any]:
+    apps: Dict[str, Any] = {}
+    all_models_dict: Dict[tuple[str, str], Any] = {}
+
+    for part in parts:
+        for row in part.get("all_models", []) or []:
+            source = str(row.get("source") or "unknown")
+            name = str(row.get("name") or "unknown")
+            tokens = int(row.get("tokens", 0) or 0)
+            if tokens == 0:
+                continue
+            tokens_in = int(row.get("tokens_in", 0) or 0)
+            tokens_out = int(row.get("tokens_out", 0) or 0)
+            tokens_cache = int(row.get("tokens_cache", 0) or 0)
+            cost = float(row.get("cost", 0.0) or 0.0)
+            messages = int(row.get("messages", 0) or 0)
+
+            app_ref = apps.setdefault(
+                source,
+                {
+                    "tokens": 0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "tokens_cache": 0,
+                    "cost": 0.0,
+                    "messages": 0,
+                    "models_dict": {},
+                },
+            )
+            app_ref["tokens"] += tokens
+            app_ref["tokens_in"] += tokens_in
+            app_ref["tokens_out"] += tokens_out
+            app_ref["tokens_cache"] += tokens_cache
+            app_ref["cost"] += cost
+            app_ref["messages"] += messages
+
+            model_ref = app_ref["models_dict"].setdefault(
+                name,
+                {
+                    "name": name,
+                    "tokens": 0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "tokens_cache": 0,
+                    "cost": 0.0,
+                    "messages": 0,
+                },
+            )
+            model_ref["tokens"] += tokens
+            model_ref["tokens_in"] += tokens_in
+            model_ref["tokens_out"] += tokens_out
+            model_ref["tokens_cache"] += tokens_cache
+            model_ref["cost"] += cost
+            model_ref["messages"] += messages
+
+            global_ref = all_models_dict.setdefault(
+                (source, name),
+                {
+                    "source": source,
+                    "name": name,
+                    "tokens": 0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "tokens_cache": 0,
+                    "cost": 0.0,
+                    "messages": 0,
+                },
+            )
+            global_ref["tokens"] += tokens
+            global_ref["tokens_in"] += tokens_in
+            global_ref["tokens_out"] += tokens_out
+            global_ref["tokens_cache"] += tokens_cache
+            global_ref["cost"] += cost
+            global_ref["messages"] += messages
+
+    for app_data in apps.values():
+        app_data["models"] = sorted(app_data["models_dict"].values(), key=lambda x: x["cost"], reverse=True)
+        del app_data["models_dict"]
+        for model_ref in app_data["models"]:
+            model_ref["cache_hit_rate"] = cache_hit_rate(model_ref["tokens_in"], model_ref["tokens_cache"])
+        app_data["cache_hit_rate"] = cache_hit_rate(app_data["tokens_in"], app_data["tokens_cache"])
+
+    all_models = sorted(all_models_dict.values(), key=lambda x: x["cost"], reverse=True)
+    for row in all_models:
+        row["cache_hit_rate"] = cache_hit_rate(row["tokens_in"], row["tokens_cache"])
+
+    total_in = sum(x["tokens_in"] for x in all_models)
+    total_cache = sum(x["tokens_cache"] for x in all_models)
+    return {
+        "total_cost": sum(x["cost"] for x in all_models),
+        "total_tokens": sum(x["tokens"] for x in all_models),
+        "total_messages": sum(x["messages"] for x in all_models),
+        "cache_hit_rate": cache_hit_rate(total_in, total_cache),
+        "apps": apps,
+        "all_models": all_models,
+    }
+
+
+def _merge_contribution_days(parts: list[list[dict]]) -> list[dict]:
+    by_date: Dict[str, dict] = {}
+    for contributions in parts:
+        for src_day in contributions:
+            date = src_day.get("date")
+            if not date:
+                continue
+            day = by_date.setdefault(
+                str(date),
+                {
+                    "date": str(date),
+                    "totals": {"tokens": 0, "cost": 0.0, "messages": 0},
+                    "intensity": 0,
+                    "tokenBreakdown": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+                    "sources": [],
+                },
+            )
+            src_totals = src_day.get("totals") or {}
+            day["totals"]["tokens"] += int(src_totals.get("tokens", 0) or 0)
+            day["totals"]["cost"] += float(src_totals.get("cost", 0.0) or 0.0)
+            day["totals"]["messages"] += int(src_totals.get("messages", 0) or 0)
+            day["intensity"] = max(int(day.get("intensity") or 0), int(src_day.get("intensity") or 0))
+
+            src_tb = src_day.get("tokenBreakdown") or {}
+            tb = day["tokenBreakdown"]
+            tb["input"] += int(src_tb.get("input", 0) or 0)
+            tb["output"] += int(src_tb.get("output", 0) or 0)
+            tb["cacheRead"] += int(src_tb.get("cacheRead", 0) or 0)
+            tb["cacheWrite"] += int(src_tb.get("cacheWrite", 0) or 0)
+            tb["reasoning"] += int(src_tb.get("reasoning", 0) or 0)
+            day["sources"].extend(src_day.get("sources") or [])
+
+    return [by_date[k] for k in sorted(by_date.keys())]
+
+
 def run_local_coding_tools_json(period_args: list[str]) -> Dict[str, Any]:
     """Collect coding-tool entries using the in-process local parsers."""
     since, until = _date_range_from_args(period_args)
     tracker = CodingToolsUsageTracker()
+    if persistent_usage_db_enabled():
+        try:
+            store, stored_sources = _sync_usage_store(tracker)
+            entries = store.query_entries(sources=stored_sources, since=since, until=until)
+            entries.extend(_collect_live_coding_entries(tracker, since, until, _usage_store_live_sources(tracker)))
+            entries.sort(key=lambda e: int(e.get("timestamp", 0) or 0))
+            return {"entries": entries}
+        except Exception:
+            # The persistent DB is a cache. If it is corrupt or temporarily
+            # unavailable, preserve current behavior by falling back to the live
+            # parsers for this request.
+            pass
     tracker.collect(since, until)
     return tracker.to_json()
 
@@ -360,15 +627,26 @@ def _contributions_from_entries(entries: list[dict]) -> list[dict]:
 
 def get_tools_data(period: str) -> Dict[str, Any]:
     period_args = period_to_range_args(period)
-    backend_json = (
-        run_local_coding_tools_json(period_args) if USE_LOCAL_CODING_TOOLS_BACKEND else run_tokscale_json(period_args)
-    )
-    return parse_entries_json(backend_json)
+    if USE_LOCAL_CODING_TOOLS_BACKEND:
+        since, until = _date_range_from_args(period_args)
+        return get_tools_data_for_range(since, until)
+    return parse_entries_json(run_tokscale_json(period_args))
 
 
-def get_tools_data_for_range(since: datetime, until: datetime) -> Dict[str, Any]:
+def get_tools_data_for_range(since: Optional[datetime], until: Optional[datetime]) -> Dict[str, Any]:
     if USE_LOCAL_CODING_TOOLS_BACKEND:
         tracker = CodingToolsUsageTracker()
+        if persistent_usage_db_enabled():
+            try:
+                store, stored_sources = _sync_usage_store(tracker)
+                store_data = store.aggregate_entries(sources=stored_sources, since=since, until=until)
+                live_entries = _collect_live_coding_entries(tracker, since, until, _usage_store_live_sources(tracker))
+                live_data = parse_entries_json({"entries": live_entries})
+                return _merge_parsed_usage([store_data, live_data])
+            except Exception:
+                # Keep the DB fail-open: serving correctness should not depend on
+                # cache health while this backend is still evolving.
+                pass
         tracker.collect(since, until)
         return parse_entries_json(tracker.to_json())
 
@@ -381,6 +659,39 @@ def get_tools_data_for_range_str(date_from: str, date_to: str) -> Dict[str, Any]
     """Get tools data for a date range specified as strings (YYYY-MM-DD)."""
     since, until = parse_date_range(date_from, date_to)
     return get_tools_data_for_range(since, until)
+
+
+def get_tools_contributions_for_range(since: Optional[datetime], until: Optional[datetime]) -> list[dict]:
+    if USE_LOCAL_CODING_TOOLS_BACKEND:
+        tracker = CodingToolsUsageTracker()
+        if persistent_usage_db_enabled():
+            try:
+                store, stored_sources = _sync_usage_store(tracker)
+                store_days = store.contribution_days(sources=stored_sources, since=since, until=until)
+                live_entries = _collect_live_coding_entries(tracker, since, until, _usage_store_live_sources(tracker))
+                live_days = _contributions_from_entries(live_entries)
+                return _merge_contribution_days([store_days, live_days])
+            except Exception:
+                pass
+        tracker.collect(since, until)
+        return _contributions_from_entries(tracker.to_json().get("entries", []))
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+        temp_path = f.name
+    args = ["bunx", "tokscale@latest", "graph", "--no-spinner", "--output", temp_path]
+    if since and until:
+        since_str = since.astimezone().strftime("%Y-%m-%d")
+        until_str = (until.astimezone() - timedelta(microseconds=1)).strftime("%Y-%m-%d")
+        args.extend(["--since", since_str, "--until", until_str])
+    result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"Tokscale graph failed: {result.stderr.strip()}")
+    with open(temp_path, "r", encoding="utf-8") as f:
+        coding_contribs = json.load(f).get("contributions", [])
+    os.unlink(temp_path)
+    return coding_contribs
 
 
 def compute_usage(period: str, date_from: Optional[str] = None, date_to: Optional[str] = None) -> Dict[str, Any]:
@@ -573,30 +884,15 @@ def compute_stats(year: Optional[int] = None) -> Dict[str, Any]:
     session_data = get_session_usage_year(year) if year else get_session_usage_days(365)
     ocl_map = {c.get("date"): c for c in session_data.get("contributions", [])}
 
-    if USE_LOCAL_CODING_TOOLS_BACKEND:
-        if year:
-            start_date = datetime(year, 1, 1)
-            end_date = datetime(year, 12, 31)
-            period_args = ["--since", start_date.strftime("%Y-%m-%d"), "--until", end_date.strftime("%Y-%m-%d")]
-        else:
-            period_args = period_to_range_args("365")
-
-        coding_entries = run_local_coding_tools_json(period_args).get("entries", [])
-        coding_contribs = _contributions_from_entries(coding_entries)
+    if year:
+        start_date = datetime(year, 1, 1)
+        end_date = datetime(year, 12, 31)
+        period_args = ["--since", start_date.strftime("%Y-%m-%d"), "--until", end_date.strftime("%Y-%m-%d")]
     else:
-        import tempfile
+        period_args = period_to_range_args("365")
 
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
-            temp_path = f.name
-        args = ["bunx", "tokscale@latest", "graph", "--no-spinner", "--output", temp_path]
-        if year:
-            args.extend(["--year", str(year)])
-        result = subprocess.run(args, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            raise RuntimeError(f"Tokscale graph failed: {result.stderr.strip()}")
-        with open(temp_path, "r", encoding="utf-8") as f:
-            coding_contribs = json.load(f).get("contributions", [])
-        os.unlink(temp_path)
+    since, until = _date_range_from_args(period_args)
+    coding_contribs = get_tools_contributions_for_range(since, until)
 
     # Remove tokscale/openclaw duplicate if fallback mode.
     for day in coding_contribs:

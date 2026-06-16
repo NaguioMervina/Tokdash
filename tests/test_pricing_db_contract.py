@@ -97,6 +97,25 @@ def test_glm_5_1_alias_entries_resolve():
         )
 
 
+def test_glm_5_2_cloudflare_pricing_resolves():
+    """GLM-5.2 Cloudflare pricing and aliases must resolve."""
+    db = PricingDatabase()
+
+    expected_cost = (1000 * 1.4 + 2000 * 4.4 + 3000 * 0.26 + 4000 * 1.4) / 1_000_000
+    for model in [
+        "glm-5.2",
+        "glm5.2",
+        "glm-5-2",
+        "cloudflare/glm-5.2",
+        "z-ai/glm-5.2",
+        "zhipu/glm-5.2",
+    ]:
+        cost = db.get_cost(model, 1000, 2000, 3000, 4000)
+        assert abs(cost - expected_cost) < 1e-12, (
+            f"{model!r} should resolve to GLM-5.2 Cloudflare pricing"
+        )
+
+
 def test_opus_4_7_alias_entries_resolve():
     """Opus 4.7 shorthand aliases must resolve to the canonical pricing."""
     db = PricingDatabase()

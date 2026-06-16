@@ -1,9 +1,11 @@
 # History retention — why Tokdash's past months can shrink (and how to prevent it)
 
-Tokdash has **no database of its own**. Every number it shows is computed *live* by
-re-reading each client's local session logs. That makes it zero-config and private — but it
-also means **if a client deletes its old logs, that usage disappears from Tokdash too.** A
-month you looked at weeks ago can quietly read lower than it did then.
+Tokdash now keeps a local SQLite usage index at `~/.tokdash/usage.sqlite3` by default.
+The index is for performance: it stores parsed usage rows so repeated dashboard/API reads do
+not have to reparse every client log. Source logs still matter. If a client deletes old logs
+before Tokdash has indexed them, that usage is still gone. A month you looked at weeks ago can
+quietly read lower than it did then when the DB is disabled, stale, or never saw the deleted
+files.
 
 This is not a Tokdash bug; it is the client doing housekeeping. The good news: only **two**
 of the supported clients delete history by default, and **both can be turned off with a
@@ -43,14 +45,20 @@ file timestamp) survived.
 
 ## How the mechanism works
 
-- Tokdash reads files like `~/.claude*/projects/**/*.jsonl` on every request.
+- Tokdash reads files like `~/.claude*/projects/**/*.jsonl` and syncs a local SQLite
+  usage index. You can force this with `tokdash db sync`, run a loop with `tokdash db watch`,
+  or enable the serve-time loop with `TOKDASH_USAGE_DB_WATCH=1`.
 - Claude Code and Gemini CLI run a **startup cleanup** that hard-deletes session files older
   than a retention window (default **30 days**), based on the file's last-modified time.
 - **Continuing** a session (sending a new message) refreshes its file timestamp, so
   actively-used sessions survive; standalone sessions you never reopen age out and are
   deleted.
-- Once a file is gone, the tokens/cost it held are gone from Tokdash. **Already-deleted data
-  is unrecoverable** — these settings only prevent *future* loss.
+- With `TOKDASH_USAGE_DB_DURABLE=1` (default), rows Tokdash has already indexed are kept when
+  a source file disappears. With `TOKDASH_USAGE_DB_DURABLE=0`, the DB strictly mirrors current
+  source files.
+- Once a file is deleted before Tokdash has indexed it, the tokens/cost it held are gone from
+  Tokdash. **Already-deleted, never-indexed data is unrecoverable** — these settings only
+  prevent *future* loss.
 
 ---
 
@@ -113,21 +121,18 @@ Already safe by default (`sessions.auto_prune: false`). Just don't enable auto-p
 
 ---
 
-## Why Tokdash doesn't ship a built-in snapshot store
+## What the SQLite index does and does not solve
 
-We considered having Tokdash maintain its own durable copy of parsed usage (a "snapshot"
-store) so history would survive regardless of what clients do. We **deferred** it because:
+The persistent usage DB is a local performance index, not a raw-log archive or billing ledger:
 
-1. **Disk is a non-issue.** Across heavy multi-client use, the entire file-based session
-   corpus was ~1.3 GB — a fraction of a percent of a typical disk. Keeping the raw logs
-   (config-based retention) is essentially free.
-2. **Config-based retention is simpler and exact.** Re-reading the original logs always
-   reflects the latest parser, with no cache-coherency, dedup, or cost-freezing edge cases.
-3. **Only two clients need any change at all.**
-
-The full snapshot design is retained as a deferred roadmap item in
-[`SNAPSHOTS_PLAN.md`](SNAPSHOTS_PLAN.md), in case the trade-offs change (e.g. a client adds
-non-disable-able cleanup, or multi-machine history sync becomes a goal).
+1. **It makes warm reads fast.** Repeated Overview, Stats, OpenClaw, and supported session
+   queries can use indexed SQL instead of scanning every log file.
+2. **It can retain rows Tokdash has already indexed.** The default durable mode keeps cached
+   rows when a source file temporarily disappears or a parser returns no rows.
+3. **It cannot reconstruct logs it never saw.** If Claude Code or Gemini CLI deletes a file
+   before Tokdash syncs it, the DB has nothing to preserve.
+4. **It is still derived data.** Parser fixes, pricing updates, and explicit resyncs may
+   change computed totals. Keep the original client logs when you need audit-grade history.
 
 ---
 

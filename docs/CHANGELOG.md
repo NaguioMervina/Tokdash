@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 0.6.0 - 2026-06-16
+
+### Added
+- Added a default-on persistent SQLite usage index at `~/.tokdash/usage.sqlite3`. It stores normalized usage rows and Codex/Claude session summaries so repeated dashboard/API reads can use indexed SQL instead of reparsing every source log. Disable it with `TOKDASH_USAGE_DB=0`, move it with `TOKDASH_USAGE_DB_PATH` or `TOKDASH_DATA_DIR`, and control missing-source retention with `TOKDASH_USAGE_DB_DURABLE`.
+- Added `tokdash db status`, `sync`, `resync`, `verify`, `repair`, and `watch` for inspecting, rebuilding, validating, repairing, and periodically syncing the local usage DB. `TOKDASH_USAGE_DB_WATCH=1` enables the same polling sync loop inside `tokdash serve`; `TOKDASH_USAGE_DB_WATCH_INTERVAL` controls the interval.
+- Added Cloudflare GLM-5.2 pricing (`glm-5.2`, input $1.40/M, output $4.40/M, cached read $0.26/M).
+
+### Changed
+- Dashboard usage aggregation now uses the persistent DB for the file-backed coding-tool and OpenClaw paths where possible, with live-parser fallback if the DB is disabled or unavailable. OpenCode continues to use its native SQLite source for windowed reads.
+- Local cold-parser benchmarks on a real multi-agent log corpus show about 30x faster usage scans than pre-0.6.0 Tokdash and 15x faster Overview today latency than `ccusage daily --json --offline`.
+
+### Fixed
+- OpenClaw token counting excludes snapshot/checkpoint/backup/sidecar transcripts, deduplicates message ids, and ignores all-zero assistant usage rows, correcting inflated totals from duplicated transcript copies.
+- Added per-test usage DB isolation so the default-on persistent DB cannot leak cached rows between fixtures.
+
 ## 0.5.7 - 2026-06-12
 
 ### Fixed

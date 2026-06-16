@@ -4,14 +4,19 @@ import argparse
 import json
 import os
 import sys
+import time
 import threading
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 import uvicorn
 
 from .api import app
 from .compute import compute_usage
+
+_DB_WATCH_THREAD_STARTED = False
+_DB_WATCH_THREAD_LOCK = threading.Lock()
 
 
 def _port_type(value: str) -> int:
@@ -55,8 +60,15 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="serve",
-        choices=["serve", "export"],
+        choices=["serve", "export", "db"],
         help="Command (default: serve)",
+    )
+    parser.add_argument(
+        "db_action",
+        nargs="?",
+        default="status",
+        choices=["status", "sync", "resync", "verify", "repair", "watch"],
+        help="Database action for `tokdash db` (default: status)",
     )
 
     # Serve options
@@ -104,6 +116,16 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
         "--output",
         type=str,
         help="Write output to a file instead of stdout",
+    )
+    parser.add_argument(
+        "--verify-period",
+        default="today",
+        help='Period for `tokdash db verify` (default: today)',
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="For `tokdash db repair`, report checks without changing counters",
     )
 
     return parser
@@ -163,6 +185,7 @@ def serve(host: str, port: int, log_level: str, open_browser: bool = True) -> No
         timer = threading.Timer(1.0, _open_browser, args=(url,))
         timer.daemon = True
         timer.start()
+    _start_usage_db_sync_daemon()
     # Backpressure: cap accepted concurrency and keep-alive lifetime so a load burst
     # returns 503 fast instead of queuing forever and wedging the server. The limit
     # sits above the AnyIO worker pool (~40) so cheap cache hits aren't rejected, but
@@ -187,6 +210,222 @@ def export(period: str, pretty: bool, output: str | None) -> None:
         print(payload)
 
 
+def _emit_json(payload: dict, pretty: bool, output: str | None = None) -> None:
+    text = json.dumps(payload, indent=2 if pretty else None, sort_keys=bool(pretty))
+    if output:
+        Path(output).write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+
+
+def _sync_usage_database() -> dict:
+    from .compute import _sync_usage_store
+    from .sources.coding_tools import CodingToolsUsageTracker
+    from .sources.openclaw import get_usage_for_days
+    from .sessions import get_sessions_data
+    from .usage_store import UsageEntryStore
+
+    tracker = CodingToolsUsageTracker()
+    _sync_usage_store(tracker)
+    # OpenClaw syncs all discovered files before applying the date window.
+    get_usage_for_days(36500)
+    # Session records for DB-backed Session tab paths.
+    get_sessions_data("codex", "all")
+    get_sessions_data("claude", "all")
+    return UsageEntryStore().status()
+
+
+def _resync_usage_database() -> dict:
+    from .usage_store import UsageEntryStore, usage_db_path, usage_db_process_lock
+
+    path = usage_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with usage_db_process_lock(path):
+        old_status_error = ""
+        try:
+            old_status = UsageEntryStore(path).status() if path.exists() else {"usage_entries": 0}
+        except Exception as exc:
+            old_status = {"usage_entries": 0}
+            old_status_error = str(exc)
+        old_entries = int(old_status.get("usage_entries", 0) or 0)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        tmp_path = path.with_name(f"{path.name}.tmp.{timestamp}")
+
+        old_env = os.environ.get("TOKDASH_USAGE_DB_PATH")
+        try:
+            os.environ["TOKDASH_USAGE_DB_PATH"] = str(tmp_path)
+            status = _sync_usage_database()
+            tmp_store = UsageEntryStore(tmp_path)
+            tmp_store.checkpoint()
+            new_entries = int(status.get("usage_entries", 0) or 0)
+            if old_entries > 0 and new_entries == 0:
+                status["ok"] = False
+                status["error"] = "refusing to replace populated DB with empty resync result"
+                status["old_usage_entries"] = old_entries
+                return status
+        finally:
+            if old_env is None:
+                os.environ.pop("TOKDASH_USAGE_DB_PATH", None)
+            else:
+                os.environ["TOKDASH_USAGE_DB_PATH"] = old_env
+
+        backup_paths: list[str] = []
+        for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+            if candidate.exists():
+                backup = candidate.with_name(candidate.name + f".bak.{timestamp}")
+                candidate.replace(backup)
+                backup_paths.append(str(backup))
+        tmp_path.replace(path)
+        for suffix in ("-wal", "-shm"):
+            tmp_sidecar = Path(str(tmp_path) + suffix)
+            if tmp_sidecar.exists():
+                tmp_sidecar.replace(Path(str(path) + suffix))
+
+        status = UsageEntryStore(path).status()
+        status["ok"] = True
+        status["backups"] = backup_paths
+        status["resync_mode"] = "temp-db-atomic-replace"
+        if old_status_error:
+            status["old_status_error"] = old_status_error
+        return status
+
+
+def _verify_usage_database(period: str) -> dict:
+    from .compute import compute_usage
+
+    old = os.environ.get("TOKDASH_USAGE_DB")
+    attempts = []
+    try:
+        for attempt in range(1, 6):
+            os.environ["TOKDASH_USAGE_DB"] = "0"
+            live_data = compute_usage(period)
+            os.environ["TOKDASH_USAGE_DB"] = "1"
+            db_data = compute_usage(period)
+
+            fields = ("total_tokens", "total_messages")
+            diffs = {field: int(db_data.get(field, 0) or 0) - int(live_data.get(field, 0) or 0) for field in fields}
+            cost_diff = round(
+                float(db_data.get("total_cost", 0.0) or 0.0) - float(live_data.get("total_cost", 0.0) or 0.0),
+                6,
+            )
+            ok = all(value == 0 for value in diffs.values()) and abs(cost_diff) < 0.0001
+            result = {
+                "ok": ok,
+                "period": period,
+                "attempt": attempt,
+                "db": {
+                    "total_tokens": db_data.get("total_tokens"),
+                    "total_cost": db_data.get("total_cost"),
+                    "total_messages": db_data.get("total_messages"),
+                },
+                "live": {
+                    "total_tokens": live_data.get("total_tokens"),
+                    "total_cost": live_data.get("total_cost"),
+                    "total_messages": live_data.get("total_messages"),
+                },
+                "diff": {**diffs, "total_cost": cost_diff},
+            }
+            if ok:
+                if attempts:
+                    result["attempts"] = attempts
+                return result
+            attempts.append(result)
+            time.sleep(2)
+        result["attempts"] = attempts[:-1]
+        return result
+    finally:
+        if old is None:
+            os.environ.pop("TOKDASH_USAGE_DB", None)
+        else:
+            os.environ["TOKDASH_USAGE_DB"] = old
+
+
+def _repair_usage_database(*, dry_run: bool = False) -> dict:
+    from .usage_store import UsageEntryStore
+
+    return UsageEntryStore().repair(apply=not dry_run)
+
+
+def _usage_db_watch_enabled() -> bool:
+    value = os.environ.get("TOKDASH_USAGE_DB_WATCH", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _usage_db_watch_interval() -> int:
+    return _positive_int_env("TOKDASH_USAGE_DB_WATCH_INTERVAL", 30)
+
+
+def _sync_watch_once_quietly() -> None:
+    try:
+        _sync_usage_database()
+    except Exception:
+        pass
+
+
+def _start_usage_db_sync_daemon() -> None:
+    global _DB_WATCH_THREAD_STARTED
+    if not _usage_db_watch_enabled():
+        return
+    try:
+        from .usage_store import persistent_usage_db_enabled
+
+        if not persistent_usage_db_enabled():
+            return
+    except Exception:
+        return
+
+    interval = _usage_db_watch_interval()
+
+    def loop() -> None:
+        while True:
+            _sync_watch_once_quietly()
+            time.sleep(interval)
+
+    with _DB_WATCH_THREAD_LOCK:
+        if _DB_WATCH_THREAD_STARTED:
+            return
+        thread = threading.Thread(target=loop, name="tokdash-usage-db-watch", daemon=True)
+        thread.start()
+        _DB_WATCH_THREAD_STARTED = True
+
+
+def _watch_usage_database(pretty: bool, output: str | None) -> int:
+    interval = _usage_db_watch_interval()
+    try:
+        while True:
+            status = _sync_usage_database()
+            status["watch_interval_seconds"] = interval
+            _emit_json(status, pretty, output)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def db_command(action: str, pretty: bool, output: str | None, verify_period: str, dry_run: bool = False) -> int:
+    from .usage_store import UsageEntryStore
+
+    if action == "status":
+        _emit_json(UsageEntryStore().status(), pretty, output)
+        return 0
+    if action == "sync":
+        _emit_json(_sync_usage_database(), pretty, output)
+        return 0
+    if action == "resync":
+        _emit_json(_resync_usage_database(), pretty, output)
+        return 0
+    if action == "verify":
+        result = _verify_usage_database(verify_period)
+        _emit_json(result, pretty, output)
+        return 0 if result.get("ok") else 1
+    if action == "repair":
+        result = _repair_usage_database(dry_run=dry_run)
+        _emit_json(result, pretty, output)
+        return 0 if result.get("ok") else 1
+    if action == "watch":
+        return _watch_usage_database(pretty, output)
+    raise SystemExit(f"Unknown db action: {action}")
+
+
 def cli(argv: list[str] | None = None, prog: str = "tokdash") -> int:
     parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
@@ -199,6 +438,9 @@ def cli(argv: list[str] | None = None, prog: str = "tokdash") -> int:
     if args.command == "export":
         export(args.period, args.pretty, args.output)
         return 0
+
+    if args.command == "db":
+        return db_command(args.db_action, args.pretty, args.output, args.verify_period, args.dry_run)
 
     parser.error(f"Unknown command: {args.command}")
     return 2

@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, Optional
 from .compute import cache_hit_rate, period_to_days
 from .dateutil import parse_date_range
 from .pricing import PricingDatabase
+from .usage_store import UsageEntryStore, parser_code_signature, persistent_usage_db_enabled
 
 
 SESSION_TOOLS = ("codex", "claude", "opencode")
@@ -239,8 +240,16 @@ def _iter_file_signatures(root: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(items)
 
 
+def _pricing_signature() -> tuple:
+    try:
+        stat = _PRICING_DB.db_path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except (FileNotFoundError, OSError, AttributeError):
+        return ()
+
+
 @lru_cache(maxsize=512)
-def _parse_codex_session_file(path_str: str, _mtime_ns: int, _size: int) -> Optional[Dict[str, Any]]:
+def _parse_codex_session_file(path_str: str, _mtime_ns: int, _size: int, _pricing_sig: tuple = ()) -> Optional[Dict[str, Any]]:
     session_path = Path(path_str)
     if not session_path.exists():
         return None
@@ -324,10 +333,10 @@ def _parse_codex_session_file(path_str: str, _mtime_ns: int, _size: int) -> Opti
 
 
 @lru_cache(maxsize=8)
-def _load_codex_sessions(signature: tuple[tuple[str, int, int], ...]) -> Dict[str, Dict[str, Any]]:
+def _load_codex_sessions(signature: tuple[tuple[str, int, int], ...], pricing_sig: tuple = ()) -> Dict[str, Dict[str, Any]]:
     sessions: Dict[str, Dict[str, Any]] = {}
     for path_str, mtime_ns, size in signature:
-        raw = _parse_codex_session_file(path_str, mtime_ns, size)
+        raw = _parse_codex_session_file(path_str, mtime_ns, size, pricing_sig)
         if raw:
             sessions[str(raw["session_id"])] = raw
     return sessions
@@ -335,11 +344,11 @@ def _load_codex_sessions(signature: tuple[tuple[str, int, int], ...]) -> Dict[st
 
 def _codex_sessions() -> Dict[str, Dict[str, Any]]:
     root = Path.home() / ".codex" / "sessions"
-    return _load_codex_sessions(_iter_file_signatures(root))
+    return _load_codex_sessions(_iter_file_signatures(root), _pricing_signature())
 
 
 @lru_cache(maxsize=512)
-def _parse_claude_session_file(path_str: str, _mtime_ns: int, _size: int) -> Optional[Dict[str, Any]]:
+def _parse_claude_session_file(path_str: str, _mtime_ns: int, _size: int, _pricing_sig: tuple = ()) -> Optional[Dict[str, Any]]:
     session_path = Path(path_str)
     if not session_path.exists():
         return None
@@ -438,10 +447,10 @@ def _parse_claude_session_file(path_str: str, _mtime_ns: int, _size: int) -> Opt
 
 
 @lru_cache(maxsize=8)
-def _load_claude_sessions(signature: tuple[tuple[str, int, int], ...]) -> Dict[str, Dict[str, Any]]:
+def _load_claude_sessions(signature: tuple[tuple[str, int, int], ...], pricing_sig: tuple = ()) -> Dict[str, Dict[str, Any]]:
     sessions: Dict[str, Dict[str, Any]] = {}
     for path_str, mtime_ns, size in signature:
-        raw = _parse_claude_session_file(path_str, mtime_ns, size)
+        raw = _parse_claude_session_file(path_str, mtime_ns, size, pricing_sig)
         if raw:
             session_id = str(raw["session_id"])
             if session_id in sessions:
@@ -458,19 +467,27 @@ def _claude_sessions() -> Dict[str, Dict[str, Any]]:
         if projects_dir.is_dir():
             all_sigs.extend(_iter_file_signatures(projects_dir))
     all_sigs.sort(key=lambda item: item[0])
-    return _load_claude_sessions(tuple(all_sigs))
+    return _load_claude_sessions(tuple(all_sigs), _pricing_signature())
 
 
-def _opencode_db_signature() -> tuple[str, int, int] | None:
+def _opencode_db_signature() -> tuple[tuple[str, int, int], ...]:
     db_path = Path.home() / ".local/share/opencode/opencode.db"
     if not db_path.exists():
-        return None
-    return _file_signature(db_path)
+        return ()
+    signatures: list[tuple[str, int, int]] = []
+    for candidate in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")):
+        try:
+            signatures.append(_file_signature(candidate))
+        except FileNotFoundError:
+            continue
+    return tuple(signatures)
 
 
 @lru_cache(maxsize=8)
-def _load_opencode_sessions(path_str: str, _mtime_ns: int, _size: int) -> Dict[str, Dict[str, Any]]:
-    db_path = Path(path_str)
+def _load_opencode_sessions(signature: tuple[tuple[str, int, int], ...], _pricing_sig: tuple = ()) -> Dict[str, Dict[str, Any]]:
+    if not signature:
+        return {}
+    db_path = Path(signature[0][0])
     if not db_path.exists():
         return {}
 
@@ -563,13 +580,18 @@ def _load_opencode_sessions(path_str: str, _mtime_ns: int, _size: int) -> Dict[s
 
 def _opencode_sessions() -> Dict[str, Dict[str, Any]]:
     signature = _opencode_db_signature()
-    if signature is None:
+    if not signature:
         return {}
-    return _load_opencode_sessions(*signature)
+    return _load_opencode_sessions(signature, _pricing_signature())
 
 
 def _raw_sessions_for_tool(tool: str) -> Dict[str, Dict[str, Any]]:
     key = str(tool or "").strip().lower()
+    if key in {"codex", "claude"} and persistent_usage_db_enabled():
+        try:
+            return _stored_sessions_for_tool(key)
+        except Exception:
+            pass
     if key == "codex":
         return _codex_sessions()
     if key == "claude":
@@ -577,6 +599,57 @@ def _raw_sessions_for_tool(tool: str) -> Dict[str, Dict[str, Any]]:
     if key == "opencode":
         return _opencode_sessions()
     raise ValueError(f"Unsupported session tool: {tool}")
+
+
+def _session_records_to_raw_sessions(tool: str, records: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    sessions: Dict[str, Dict[str, Any]] = {}
+    for raw in records:
+        session_id = str(raw.get("session_id") or "")
+        if not session_id:
+            continue
+        if tool == "codex":
+            # Match the live Codex loader: sorted files with the same session_id
+            # are not merged; the later record wins.
+            sessions[session_id] = raw
+        elif session_id in sessions:
+            sessions[session_id] = _merge_raw_session(sessions[session_id], raw)
+        else:
+            sessions[session_id] = raw
+    return sessions
+
+
+def _stored_sessions_for_tool(tool: str) -> Dict[str, Dict[str, Any]]:
+    store = UsageEntryStore()
+    if tool == "codex":
+        root = Path.home() / ".codex" / "sessions"
+        signatures = _iter_file_signatures(root)
+        parser_sig = {"parser": parser_code_signature(_parse_codex_session_file), "pricing": _pricing_signature()}
+        pricing_sig = _pricing_signature()
+        store.sync_session_files(
+            "codex",
+            signatures,
+            parser=parser_sig,
+            parse_file_session=lambda file_sig: _parse_codex_session_file(*file_sig, pricing_sig),
+        )
+    elif tool == "claude":
+        all_sigs: list[tuple[str, int, int]] = []
+        for claude_dir in sorted(Path.home().glob(".claude*")):
+            projects_dir = claude_dir / "projects"
+            if projects_dir.is_dir():
+                all_sigs.extend(_iter_file_signatures(projects_dir))
+        all_sigs.sort(key=lambda item: item[0])
+        parser_sig = {"parser": parser_code_signature(_parse_claude_session_file), "pricing": _pricing_signature()}
+        pricing_sig = _pricing_signature()
+        store.sync_session_files(
+            "claude",
+            tuple(all_sigs),
+            parser=parser_sig,
+            parse_file_session=lambda file_sig: _parse_claude_session_file(*file_sig, pricing_sig),
+        )
+    else:
+        raise ValueError(f"Unsupported stored session tool: {tool}")
+
+    return _session_records_to_raw_sessions(tool, store.query_session_records(tool))
 
 
 def get_sessions_data(tool: str, period: str, date_from: Optional[str] = None, date_to: Optional[str] = None, limit: Optional[int] = None) -> Dict[str, Any]:

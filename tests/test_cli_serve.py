@@ -14,6 +14,32 @@ def test_no_open_flag_sets_true():
     assert args.no_open is True
 
 
+def test_db_command_defaults_to_status():
+    args = cli.build_parser("tokdash").parse_args(["db"])
+    assert args.command == "db"
+    assert args.db_action == "status"
+
+
+def test_db_verify_period_arg():
+    args = cli.build_parser("tokdash").parse_args(["db", "verify", "--verify-period", "week"])
+    assert args.command == "db"
+    assert args.db_action == "verify"
+    assert args.verify_period == "week"
+
+
+def test_db_repair_dry_run_arg():
+    args = cli.build_parser("tokdash").parse_args(["db", "repair", "--dry-run"])
+    assert args.command == "db"
+    assert args.db_action == "repair"
+    assert args.dry_run is True
+
+
+def test_db_watch_arg():
+    args = cli.build_parser("tokdash").parse_args(["db", "watch"])
+    assert args.command == "db"
+    assert args.db_action == "watch"
+
+
 def test_has_display_false_in_ci(monkeypatch):
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("SSH_TTY", raising=False)
@@ -124,3 +150,25 @@ def test_serve_passes_backpressure_knobs_to_uvicorn(monkeypatch):
     cli.serve("127.0.0.1", 55423, "info", open_browser=False)
     assert captured["limit_concurrency"] == 99
     assert captured["timeout_keep_alive"] == 7
+
+
+def test_serve_starts_usage_db_watch_when_enabled(monkeypatch):
+    started: list[str] = []
+    monkeypatch.setattr(cli, "_DB_WATCH_THREAD_STARTED", False)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_has_display", lambda: False)
+    monkeypatch.setenv("TOKDASH_USAGE_DB", "1")
+    monkeypatch.setenv("TOKDASH_USAGE_DB_WATCH", "1")
+
+    class FakeThread:
+        def __init__(self, target, name, daemon):
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self):
+            started.append(self.name)
+
+    monkeypatch.setattr(cli.threading, "Thread", FakeThread)
+    cli.serve("127.0.0.1", 55423, "info", open_browser=False)
+    assert started == ["tokdash-usage-db-watch"]

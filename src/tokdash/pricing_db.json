@@ -1,6 +1,6 @@
 {
-  "version": "2.0.7",
-  "lastUpdated": "2026-06-02T22:39:42Z",
+  "version": "2.0.8",
+  "lastUpdated": "2026-06-15T14:40:31Z",
   "note": "Comprehensive pricing database with all Moonshot, MiniMax, GLM, and OpenAI models from OpenRouter. Cache pricing estimated at 10% of input for cache_read, 100% of input for cache_write.",
   "aliases": {
     "kimi-2.5": "kimi-k2.5",
@@ -23,6 +23,11 @@
     "glm-5-1": "glm-5.1",
     "z-ai/glm-5.1": "glm-5.1",
     "zhipu/glm-5.1": "glm-5.1",
+    "glm5.2": "glm-5.2",
+    "glm-5-2": "glm-5.2",
+    "z-ai/glm-5.2": "glm-5.2",
+    "zhipu/glm-5.2": "glm-5.2",
+    "cloudflare/glm-5.2": "glm-5.2",
     "opus-4.7": "claude-opus-4.7",
     "opus-4.8": "claude-opus-4.8",
     "fable-5": "claude-fable-5",
@@ -80,6 +85,15 @@
       "unit": "per_million_tokens",
       "source": "moonshot-ai/kimi-k2.6",
       "note": "Moonshot AI SG int4 price supplied 2026-04-24"
+    },
+    "kimi-k2.7-code": {
+      "provider": "moonshotai",
+      "input": 0.75,
+      "output": 3.5,
+      "cache_read": 0.16,
+      "cache_write": 0.75,
+      "unit": "per_million_tokens",
+      "source": "openrouter.ai/moonshotai/kimi-k2.7-code"
     },
     "kimi-k2-0905:exacto": {
       "provider": "moonshotai",
@@ -274,6 +288,16 @@
       "unit": "per_million_tokens",
       "source": "openrouter.ai/z-ai/glm-5.1",
       "note": "Official price used (https://docs.z.ai/guides/overview/pricing)"
+    },
+    "glm-5.2": {
+      "provider": "cloudflare",
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26,
+      "cache_write": 1.4,
+      "unit": "per_million_tokens",
+      "source": "cloudflare/glm-5.2",
+      "note": "Cloudflare listed price supplied 2026-06-16; cache_write uses the input rate because only cached-read pricing was supplied."
     },
     "glm-5v-turbo": {
       "provider": "z-ai",
@@ -1949,6 +1973,15 @@
       "cache_write": 0.15,
       "unit": "per_million_tokens",
       "source": "openrouter.ai/qwen/qwq-32b"
+    },
+    "qwen3.7-plus": {
+      "provider": "qwen",
+      "input": 0.32,
+      "output": 1.28,
+      "cache_read": 0.064,
+      "cache_write": 0.4,
+      "unit": "per_million_tokens",
+      "source": "openrouter.ai/qwen/qwen3.7-plus"
     },
     "_comment_bytedance": "=== ByteDance Models ===",
     "seed-1.6": {

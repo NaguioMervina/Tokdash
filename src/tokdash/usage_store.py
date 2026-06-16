@@ -1,0 +1,1154 @@
+from __future__ import annotations
+
+import inspect
+import json
+import os
+import sqlite3
+import threading
+import hashlib
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+
+
+SCHEMA_VERSION = 4
+SIGNATURE_VERSION = 2
+
+_WRITE_LOCK = threading.RLock()
+_SCHEMA_LOCK = threading.RLock()
+_SCHEMA_READY: set[str] = set()
+
+
+def persistent_usage_db_enabled() -> bool:
+    value = os.environ.get("TOKDASH_USAGE_DB", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def usage_db_path() -> Path:
+    explicit = os.environ.get("TOKDASH_USAGE_DB_PATH", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    data_dir = Path(os.environ.get("TOKDASH_DATA_DIR", "~/.tokdash")).expanduser()
+    return data_dir / "usage.sqlite3"
+
+
+@contextmanager
+def usage_db_process_lock(db_path: Optional[Path] = None):
+    """Serialize DB writes/resyncs across Tokdash processes when supported."""
+    path = db_path or usage_db_path()
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _WRITE_LOCK:
+        if fcntl is None:
+            yield
+            return
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def durable_usage_db_enabled() -> bool:
+    value = os.environ.get("TOKDASH_USAGE_DB_DURABLE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return sorted(value)
+    return str(value)
+
+
+def stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def parser_code_signature(obj: Any) -> dict[str, Any]:
+    """Return a cheap signature for the parser implementation module.
+
+    The persistent store is a parse cache, not a source of truth. Including the
+    parser module file in the signature invalidates cached rows after package
+    upgrades or local parser edits, even when the source logs did not change.
+    """
+    try:
+        obj = getattr(obj, "__wrapped__", obj)
+        if inspect.isclass(obj):
+            label = f"{obj.__module__}.{obj.__name__}"
+            path = inspect.getsourcefile(obj)
+        elif inspect.isfunction(obj):
+            label = f"{obj.__module__}.{obj.__name__}"
+            path = inspect.getsourcefile(obj)
+        else:
+            cls = obj.__class__
+            label = f"{cls.__module__}.{cls.__name__}"
+            path = inspect.getsourcefile(cls)
+        if not path:
+            return {"object": label}
+        stat = Path(path).stat()
+        return {
+            "object": label,
+            "path": str(Path(path).resolve()),
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+        }
+    except Exception:
+        return {"object": obj.__class__.__name__}
+
+
+def build_source_signature(*, files: Any, pricing: Any = None, parser: Any = None, extra: Any = None) -> str:
+    return stable_json(
+        {
+            "signature_version": SIGNATURE_VERSION,
+            "files": files,
+            "pricing": pricing,
+            "parser": parser,
+            "extra": extra,
+        }
+    )
+
+
+def _timestamp_ms(value: Any) -> int:
+    try:
+        if isinstance(value, datetime):
+            dt = value
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.astimezone(timezone.utc).timestamp() * 1000)
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _int_field(entry: dict[str, Any], key: str) -> int:
+    try:
+        return int(entry.get(key, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _float_field(entry: dict[str, Any], key: str) -> float:
+    try:
+        return float(entry.get(key, 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _entry_for_storage(entry: dict[str, Any]) -> Optional[dict[str, Any]]:
+    source = str(entry.get("source") or "unknown")
+    model = str(entry.get("model") or "unknown")
+    provider = str(entry.get("provider") or "")
+    timestamp = _timestamp_ms(entry.get("timestamp"))
+    if timestamp <= 0:
+        return None
+
+    raw = dict(entry)
+    raw["source"] = source
+    raw["model"] = model
+    raw["provider"] = provider
+    raw["input"] = _int_field(raw, "input")
+    raw["output"] = _int_field(raw, "output")
+    raw["cacheRead"] = _int_field(raw, "cacheRead")
+    raw["cacheWrite"] = _int_field(raw, "cacheWrite")
+    raw["reasoning"] = _int_field(raw, "reasoning")
+    raw["cost"] = _float_field(raw, "cost")
+    raw["timestamp"] = timestamp
+    raw["messageCount"] = _int_field(raw, "messageCount") or 1
+    raw["entry_key"] = _entry_key(raw)
+    return raw
+
+
+def _entry_key(entry: dict[str, Any]) -> str:
+    explicit = entry.get("entry_id") or entry.get("message_id") or entry.get("id")
+    if explicit:
+        return str(explicit)
+    basis = {
+        "source": entry.get("source"),
+        "model": entry.get("model"),
+        "provider": entry.get("provider"),
+        "timestamp": entry.get("timestamp"),
+        "input": entry.get("input"),
+        "output": entry.get("output"),
+        "cacheRead": entry.get("cacheRead"),
+        "cacheWrite": entry.get("cacheWrite"),
+        "reasoning": entry.get("reasoning"),
+        "cost": round(float(entry.get("cost", 0.0) or 0.0), 10),
+    }
+    digest = hashlib.sha1(stable_json(basis).encode("utf-8")).hexdigest()
+    return f"hash:{digest}"
+
+
+def _normalize_file_signatures(file_signatures: Iterable[Any]) -> tuple[tuple[str, int, int], ...]:
+    out: list[tuple[str, int, int]] = []
+    for item in file_signatures:
+        try:
+            path, mtime_ns, size = item[:3]
+            out.append((str(path), int(mtime_ns), int(size)))
+        except Exception:
+            continue
+    return tuple(sorted(out))
+
+
+def _session_record_list(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [raw]
+    out: list[dict[str, Any]] = []
+    try:
+        for item in raw:
+            if isinstance(item, dict):
+                out.append(item)
+    except TypeError:
+        return []
+    return out
+
+
+class UsageEntryStore:
+    """SQLite-backed persistent cache for normalized token usage rows."""
+
+    def __init__(self, db_path: Optional[Path] = None):
+        self.path = db_path or usage_db_path()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _connect(self, *, ensure_schema: bool = True) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.path), timeout=30)
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.row_factory = sqlite3.Row
+        if ensure_schema:
+            self._ensure_schema_once(conn)
+        return conn
+
+    def _ensure_schema_once(self, conn: sqlite3.Connection) -> None:
+        key = str(self.path.resolve())
+        if key in _SCHEMA_READY:
+            return
+        with _SCHEMA_LOCK:
+            if key in _SCHEMA_READY:
+                return
+            self._ensure_schema(conn)
+            _SCHEMA_READY.add(key)
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS source_state (
+                source TEXT PRIMARY KEY,
+                signature TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                entry_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS file_state (
+                source TEXT NOT NULL,
+                path TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                safe_offset INTEGER NOT NULL DEFAULT 0,
+                missing INTEGER NOT NULL DEFAULT 0,
+                signature TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                entry_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source, path)
+            );
+            CREATE TABLE IF NOT EXISTS usage_entries (
+                id INTEGER PRIMARY KEY,
+                source TEXT NOT NULL,
+                file_path TEXT NOT NULL DEFAULT '',
+                entry_key TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '',
+                timestamp INTEGER NOT NULL,
+                input INTEGER NOT NULL DEFAULT 0,
+                output INTEGER NOT NULL DEFAULT 0,
+                cache_read INTEGER NOT NULL DEFAULT 0,
+                cache_write INTEGER NOT NULL DEFAULT 0,
+                reasoning INTEGER NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 1,
+                raw_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_records (
+                tool TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                safe_offset INTEGER NOT NULL DEFAULT 0,
+                missing INTEGER NOT NULL DEFAULT 0,
+                signature TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                raw_json TEXT NOT NULL,
+                PRIMARY KEY (tool, file_path, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_entries_source_time
+                ON usage_entries(source, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_usage_entries_source_file
+                ON usage_entries(source, file_path);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_entries_source_key
+                ON usage_entries(source, entry_key)
+                WHERE entry_key != '';
+            CREATE INDEX IF NOT EXISTS idx_usage_entries_time
+                ON usage_entries(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_usage_entries_group
+                ON usage_entries(source, provider, model, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_session_records_tool_session
+                ON session_records(tool, session_id);
+            """
+        )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(usage_entries)").fetchall()}
+        if "file_path" not in columns:
+            conn.execute("ALTER TABLE usage_entries ADD COLUMN file_path TEXT NOT NULL DEFAULT ''")
+        if "entry_key" not in columns:
+            conn.execute("ALTER TABLE usage_entries ADD COLUMN entry_key TEXT NOT NULL DEFAULT ''")
+        file_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(file_state)").fetchall()}
+        if "safe_offset" not in file_columns:
+            conn.execute("ALTER TABLE file_state ADD COLUMN safe_offset INTEGER NOT NULL DEFAULT 0")
+        if "missing" not in file_columns:
+            conn.execute("ALTER TABLE file_state ADD COLUMN missing INTEGER NOT NULL DEFAULT 0")
+        session_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(session_records)").fetchall()}
+        if "safe_offset" not in session_columns:
+            conn.execute("ALTER TABLE session_records ADD COLUMN safe_offset INTEGER NOT NULL DEFAULT 0")
+        if "missing" not in session_columns:
+            conn.execute("ALTER TABLE session_records ADD COLUMN missing INTEGER NOT NULL DEFAULT 0")
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        current = int(row["value"]) if row else 0
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(f"unsupported usage DB schema {current}; expected <= {SCHEMA_VERSION}")
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.commit()
+
+    def source_signature(self, source: str) -> Optional[str]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT signature FROM source_state WHERE source = ?",
+                (source,),
+            ).fetchone()
+            return str(row["signature"]) if row else None
+
+    def sync_source(
+        self,
+        source: str,
+        signature: str,
+        parse_entries: Callable[[], Iterable[dict[str, Any]]],
+    ) -> bool:
+        """Sync one source if its signature changed.
+
+        Returns True when rows were replaced, False when the stored source was
+        already current. Parser exceptions are intentionally allowed to bubble
+        so callers can fail open to the live parser path.
+        """
+        if self.source_signature(source) == signature:
+            return False
+
+        rows = [_entry_for_storage(e) for e in parse_entries()]
+        entries = [e for e in rows if e is not None]
+
+        with usage_db_process_lock(self.path):
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    "SELECT signature FROM source_state WHERE source = ?",
+                    (source,),
+                ).fetchone()
+                if row and row["signature"] == signature:
+                    return False
+                if durable_usage_db_enabled() and not entries:
+                    existing_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) AS n FROM usage_entries WHERE source = ?",
+                            (source,),
+                        ).fetchone()["n"]
+                    )
+                    if existing_count > 0:
+                        return False
+
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM usage_entries WHERE source = ?", (source,))
+                conn.execute("DELETE FROM file_state WHERE source = ?", (source,))
+                conn.executemany(
+                    """
+                    INSERT INTO usage_entries (
+                        source, file_path, entry_key, model, provider, timestamp,
+                        input, output, cache_read, cache_write, reasoning,
+                        cost, message_count, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            e["source"],
+                            "",
+                            e["entry_key"],
+                            e["model"],
+                            e["provider"],
+                            e["timestamp"],
+                            e["input"],
+                            e["output"],
+                            e["cacheRead"],
+                            e["cacheWrite"],
+                            e["reasoning"],
+                            e["cost"],
+                            e["messageCount"],
+                            stable_json(e),
+                        )
+                        for e in entries
+                    ],
+                )
+                conn.execute(
+                    """
+                    INSERT INTO source_state(source, signature, updated_at_ms, entry_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source) DO UPDATE SET
+                        signature = excluded.signature,
+                        updated_at_ms = excluded.updated_at_ms,
+                        entry_count = excluded.entry_count
+                    """,
+                    (
+                        source,
+                        signature,
+                        int(datetime.now(timezone.utc).timestamp() * 1000),
+                        len(entries),
+                    ),
+                )
+                conn.commit()
+                return True
+
+    def sync_files(
+        self,
+        source: str,
+        file_signatures: Iterable[Any],
+        *,
+        pricing: Any = None,
+        parser: Any = None,
+        parse_file_entries: Callable[[tuple[str, int, int]], Iterable[dict[str, Any]]],
+        parse_file_tail_entries: Optional[
+            Callable[[tuple[str, int, int], int], tuple[Iterable[dict[str, Any]], int]]
+        ] = None,
+        durable: Optional[bool] = None,
+    ) -> bool:
+        """Sync a file-backed source by replacing only changed files.
+
+        This is the middle tier between agentview-style append ingestion and the
+        old whole-source replacement. It keeps correctness simple: a changed file
+        is fully reparsed and its previous rows are deleted by (source, path),
+        while unchanged files remain indexed and queryable.
+        """
+        files = _normalize_file_signatures(file_signatures)
+        file_sig_by_path = {
+            path: build_source_signature(
+                files=[(path, mtime_ns, size)],
+                pricing=pricing,
+                parser=parser,
+                extra={"mode": "file"},
+            )
+            for path, mtime_ns, size in files
+        }
+        source_signature = build_source_signature(
+            files=files,
+            pricing=pricing,
+            parser=parser,
+            extra={"mode": "files"},
+        )
+
+        keep_missing = durable_usage_db_enabled() if durable is None else durable
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT path, mtime_ns, size, safe_offset, missing, signature FROM file_state WHERE source = ?",
+                (source,),
+            ).fetchall()
+            stored = {
+                str(row["path"]): {
+                    "mtime_ns": int(row["mtime_ns"] or 0),
+                    "size": int(row["size"] or 0),
+                    "safe_offset": int(row["safe_offset"] or row["size"] or 0),
+                    "missing": int(row["missing"] or 0),
+                    "signature": str(row["signature"]),
+                }
+                for row in rows
+            }
+
+        current_paths = {path for path, _, _ in files}
+        removed_paths = sorted(
+            path
+            for path, state in stored.items()
+            if path not in current_paths and (not keep_missing or not int(state.get("missing") or 0))
+        )
+        changed_files = [
+            file_sig
+            for file_sig in files
+            if stored.get(file_sig[0], {}).get("signature") != file_sig_by_path[file_sig[0]]
+            or int(stored.get(file_sig[0], {}).get("missing") or 0)
+        ]
+
+        if not removed_paths and not changed_files:
+            return False
+
+        parsed: list[tuple[tuple[str, int, int], list[dict[str, Any]], int, bool]] = []
+        for file_sig in changed_files:
+            path, mtime_ns, size = file_sig
+            state = stored.get(path)
+            appended = False
+            safe_offset = int(size)
+            if parse_file_tail_entries is not None and state and not state.get("missing"):
+                old_size = int(state.get("size") or state.get("safe_offset") or 0)
+                old_sig = build_source_signature(
+                    files=[(path, int(state.get("mtime_ns") or 0), old_size)],
+                    pricing=pricing,
+                    parser=parser,
+                    extra={"mode": "file"},
+                )
+                if size > old_size and old_sig == state.get("signature"):
+                    try:
+                        tail_entries, safe_offset = parse_file_tail_entries(file_sig, old_size)
+                        rows = [_entry_for_storage(e) for e in tail_entries]
+                        parsed.append((file_sig, [e for e in rows if e is not None], int(safe_offset), True))
+                        appended = True
+                    except Exception:
+                        appended = False
+            if not appended:
+                rows = [_entry_for_storage(e) for e in parse_file_entries(file_sig)]
+                parsed.append((file_sig, [e for e in rows if e is not None], int(size), False))
+
+        with usage_db_process_lock(self.path):
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for path in removed_paths:
+                    if keep_missing:
+                        conn.execute(
+                            "UPDATE file_state SET missing = 1, updated_at_ms = ? WHERE source = ? AND path = ?",
+                            (int(datetime.now(timezone.utc).timestamp() * 1000), source, path),
+                        )
+                    else:
+                        conn.execute(
+                            "DELETE FROM usage_entries WHERE source = ? AND file_path = ?",
+                            (source, path),
+                        )
+                        conn.execute(
+                            "DELETE FROM file_state WHERE source = ? AND path = ?",
+                            (source, path),
+                        )
+
+                total_changed_entries = 0
+                for (path, mtime_ns, size), entries, safe_offset, appended in parsed:
+                    total_changed_entries += len(entries)
+                    if not appended:
+                        conn.execute(
+                            "DELETE FROM usage_entries WHERE source = ? AND file_path = ?",
+                            (source, path),
+                        )
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO usage_entries (
+                            source, file_path, entry_key, model, provider, timestamp,
+                            input, output, cache_read, cache_write, reasoning,
+                            cost, message_count, raw_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                e["source"],
+                                path,
+                                e["entry_key"],
+                                e["model"],
+                                e["provider"],
+                                e["timestamp"],
+                                e["input"],
+                                e["output"],
+                                e["cacheRead"],
+                                e["cacheWrite"],
+                                e["reasoning"],
+                                e["cost"],
+                                e["messageCount"],
+                                stable_json(e),
+                            )
+                            for e in entries
+                        ],
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO file_state(
+                            source, path, mtime_ns, size, safe_offset, missing,
+                            signature, updated_at_ms, entry_count
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(source, path) DO UPDATE SET
+                            mtime_ns = excluded.mtime_ns,
+                            size = excluded.size,
+                            safe_offset = excluded.safe_offset,
+                            missing = excluded.missing,
+                            signature = excluded.signature,
+                            updated_at_ms = excluded.updated_at_ms,
+                            entry_count = excluded.entry_count
+                        """,
+                        (
+                            source,
+                            path,
+                            mtime_ns,
+                            safe_offset,
+                            safe_offset,
+                            0,
+                            build_source_signature(
+                                files=[(path, mtime_ns, safe_offset)],
+                                pricing=pricing,
+                                parser=parser,
+                                extra={"mode": "file"},
+                            ),
+                            int(datetime.now(timezone.utc).timestamp() * 1000),
+                            len(entries),
+                        ),
+                    )
+
+                conn.execute(
+                    """
+                    UPDATE file_state
+                    SET entry_count = (
+                        SELECT COUNT(*)
+                        FROM usage_entries
+                        WHERE usage_entries.source = file_state.source
+                          AND usage_entries.file_path = file_state.path
+                    )
+                    WHERE source = ?
+                    """,
+                    (source,),
+                )
+                total_entries_row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM usage_entries WHERE source = ?",
+                    (source,),
+                ).fetchone()
+                total_entries = int(total_entries_row["n"] if total_entries_row else total_changed_entries)
+                conn.execute(
+                    """
+                    INSERT INTO source_state(source, signature, updated_at_ms, entry_count)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(source) DO UPDATE SET
+                        signature = excluded.signature,
+                        updated_at_ms = excluded.updated_at_ms,
+                        entry_count = excluded.entry_count
+                    """,
+                    (
+                        source,
+                        source_signature,
+                        int(datetime.now(timezone.utc).timestamp() * 1000),
+                        total_entries,
+                    ),
+                )
+                conn.commit()
+                return True
+
+    def query_entries(
+        self,
+        *,
+        sources: Optional[Iterable[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        args: list[Any] = []
+
+        source_list = [s for s in (sources or []) if s]
+        if source_list:
+            placeholders = ",".join("?" for _ in source_list)
+            where.append(f"source IN ({placeholders})")
+            args.extend(source_list)
+
+        if since is not None:
+            where.append("timestamp >= ?")
+            args.append(_timestamp_ms(since))
+        if until is not None:
+            where.append("timestamp < ?")
+            args.append(_timestamp_ms(until))
+
+        query = "SELECT raw_json FROM usage_entries"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY timestamp ASC, id ASC"
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(query, args).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                obj = json.loads(row["raw_json"])
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+
+    def aggregate_entries(
+        self,
+        *,
+        sources: Optional[Iterable[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        """Return parse_entries_json-compatible aggregates using SQL grouping."""
+        where, args = self._where(sources=sources, since=since, until=until)
+        query = """
+            SELECT
+                source,
+                model,
+                provider,
+                SUM(input) AS input_sum,
+                SUM(output) AS output_sum,
+                SUM(cache_read) AS cache_read_sum,
+                SUM(cache_write) AS cache_write_sum,
+                SUM(reasoning) AS reasoning_sum,
+                SUM(cost) AS cost_sum,
+                SUM(message_count) AS message_count_sum
+            FROM usage_entries
+        """
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " GROUP BY source, provider, model"
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(query, args).fetchall()
+
+        apps: dict[str, Any] = {}
+        all_models: list[dict[str, Any]] = []
+        total_cost = 0.0
+        total_tokens = 0
+        total_messages = 0
+        total_in = 0
+        total_cache = 0
+
+        for row in rows:
+            source = str(row["source"] or "unknown")
+            model = str(row["model"] or "unknown")
+            provider = str(row["provider"] or "")
+            full_model_name = f"{provider}/{model}" if provider else model
+            input_raw = int(row["input_sum"] or 0)
+            output = int(row["output_sum"] or 0)
+            cache_read = int(row["cache_read_sum"] or 0)
+            cache_write = int(row["cache_write_sum"] or 0)
+            reasoning = int(row["reasoning_sum"] or 0)
+            cost = float(row["cost_sum"] or 0.0)
+            messages = int(row["message_count_sum"] or 0)
+
+            tokens_in = input_raw + cache_write
+            tokens_cache = cache_read
+            tokens = tokens_in + output + tokens_cache + reasoning
+            if tokens == 0:
+                continue
+
+            app_ref = apps.setdefault(
+                source,
+                {
+                    "tokens": 0,
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "tokens_cache": 0,
+                    "cost": 0.0,
+                    "messages": 0,
+                    "models": [],
+                },
+            )
+            model_ref = {
+                "name": full_model_name,
+                "tokens": tokens,
+                "tokens_in": tokens_in,
+                "tokens_out": output,
+                "tokens_cache": tokens_cache,
+                "cost": cost,
+                "messages": messages,
+                "cache_hit_rate": _cache_hit_rate(tokens_in, tokens_cache),
+            }
+            app_ref["tokens"] += tokens
+            app_ref["tokens_in"] += tokens_in
+            app_ref["tokens_out"] += output
+            app_ref["tokens_cache"] += tokens_cache
+            app_ref["cost"] += cost
+            app_ref["messages"] += messages
+            app_ref["models"].append(model_ref)
+
+            all_models.append({"source": source, **model_ref})
+            total_cost += cost
+            total_tokens += tokens
+            total_messages += messages
+            total_in += tokens_in
+            total_cache += tokens_cache
+
+        for app_ref in apps.values():
+            app_ref["models"].sort(key=lambda x: x["cost"], reverse=True)
+            app_ref["cache_hit_rate"] = _cache_hit_rate(app_ref["tokens_in"], app_ref["tokens_cache"])
+        all_models.sort(key=lambda x: x["cost"], reverse=True)
+
+        return {
+            "total_cost": total_cost,
+            "total_tokens": total_tokens,
+            "total_messages": total_messages,
+            "cache_hit_rate": _cache_hit_rate(total_in, total_cache),
+            "apps": apps,
+            "all_models": all_models,
+        }
+
+    def contribution_days(
+        self,
+        *,
+        sources: Optional[Iterable[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Return Stats-tab contribution rows using SQL date/model grouping."""
+        where, args = self._where(sources=sources, since=since, until=until)
+        query = """
+            SELECT
+                date(timestamp / 1000, 'unixepoch', 'localtime') AS day,
+                source,
+                model,
+                provider,
+                SUM(input) AS input_sum,
+                SUM(output) AS output_sum,
+                SUM(cache_read) AS cache_read_sum,
+                SUM(cache_write) AS cache_write_sum,
+                SUM(reasoning) AS reasoning_sum,
+                SUM(cost) AS cost_sum,
+                COUNT(*) AS row_count
+            FROM usage_entries
+        """
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " GROUP BY day, source, provider, model ORDER BY day ASC"
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(query, args).fetchall()
+
+        by_date: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            date = str(row["day"] or "")
+            if not date:
+                continue
+            input_raw = int(row["input_sum"] or 0)
+            cache_write = int(row["cache_write_sum"] or 0)
+            input_tokens = input_raw + cache_write
+            output = int(row["output_sum"] or 0)
+            cache_read = int(row["cache_read_sum"] or 0)
+            reasoning = int(row["reasoning_sum"] or 0)
+            cost = float(row["cost_sum"] or 0.0)
+            messages = int(row["row_count"] or 0)
+            tokens = input_tokens + output + cache_read + reasoning
+
+            day = by_date.setdefault(
+                date,
+                {
+                    "date": date,
+                    "totals": {"tokens": 0, "cost": 0.0, "messages": 0},
+                    "intensity": 0,
+                    "tokenBreakdown": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0},
+                    "sources": [],
+                },
+            )
+            day["totals"]["tokens"] += tokens
+            day["totals"]["cost"] += cost
+            day["totals"]["messages"] += messages
+            tb = day["tokenBreakdown"]
+            tb["input"] += input_tokens
+            tb["output"] += output
+            tb["cacheRead"] += cache_read
+            tb["cacheWrite"] += 0
+            tb["reasoning"] += reasoning
+            day["sources"].append(
+                {
+                    "source": str(row["source"] or "unknown"),
+                    "modelId": str(row["model"] or "unknown"),
+                    "providerId": str(row["provider"] or "") or "unknown",
+                    "tokens": {
+                        "input": input_tokens,
+                        "output": output,
+                        "cacheRead": cache_read,
+                        "cacheWrite": 0,
+                        "reasoning": reasoning,
+                    },
+                    "cost": cost,
+                    "messages": messages,
+                }
+            )
+
+        return [by_date[k] for k in sorted(by_date)]
+
+    def sync_session_files(
+        self,
+        tool: str,
+        file_signatures: Iterable[Any],
+        *,
+        parser: Any = None,
+        parse_file_session: Callable[[tuple[str, int, int]], Any],
+        durable: Optional[bool] = None,
+    ) -> bool:
+        files = _normalize_file_signatures(file_signatures)
+        keep_missing = durable_usage_db_enabled() if durable is None else durable
+        sig_by_path = {
+            path: build_source_signature(
+                files=[(path, mtime_ns, size)],
+                parser=parser,
+                extra={"mode": "session-file"},
+            )
+            for path, mtime_ns, size in files
+        }
+
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT file_path, signature, missing FROM session_records WHERE tool = ?",
+                (tool,),
+            ).fetchall()
+            stored = {
+                str(row["file_path"]): {
+                    "signature": str(row["signature"]),
+                    "missing": int(row["missing"] or 0),
+                }
+                for row in rows
+            }
+
+        current_paths = {path for path, _, _ in files}
+        removed_paths = sorted(
+            path
+            for path, state in stored.items()
+            if path not in current_paths and (not keep_missing or not int(state.get("missing") or 0))
+        )
+        changed_files = [
+            file_sig
+            for file_sig in files
+            if stored.get(file_sig[0], {}).get("signature") != sig_by_path[file_sig[0]]
+            or int(stored.get(file_sig[0], {}).get("missing") or 0)
+        ]
+
+        if not removed_paths and not changed_files:
+            return False
+
+        parsed: list[tuple[tuple[str, int, int], list[dict[str, Any]]]] = []
+        for file_sig in changed_files:
+            parsed.append((file_sig, _session_record_list(parse_file_session(file_sig))))
+
+        with usage_db_process_lock(self.path):
+            with closing(self._connect()) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                for path in removed_paths:
+                    if keep_missing:
+                        conn.execute(
+                            "UPDATE session_records SET missing = 1, updated_at_ms = ? WHERE tool = ? AND file_path = ?",
+                            (now_ms, tool, path),
+                        )
+                    else:
+                        conn.execute(
+                            "DELETE FROM session_records WHERE tool = ? AND file_path = ?",
+                            (tool, path),
+                        )
+
+                for (path, mtime_ns, size), records in parsed:
+                    conn.execute(
+                        "DELETE FROM session_records WHERE tool = ? AND file_path = ?",
+                        (tool, path),
+                    )
+                    for raw in records:
+                        session_id = str(raw.get("session_id") or Path(path).stem)
+                        conn.execute(
+                            """
+                            INSERT INTO session_records(
+                                tool, session_id, file_path, mtime_ns, size, safe_offset,
+                                missing, signature, updated_at_ms, raw_json
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                tool,
+                                session_id,
+                                path,
+                                mtime_ns,
+                                size,
+                                size,
+                                0,
+                                sig_by_path[path],
+                                now_ms,
+                                stable_json(raw),
+                            ),
+                        )
+                conn.commit()
+                return True
+
+    def query_session_records(self, tool: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT raw_json
+                FROM session_records
+                WHERE tool = ?
+                ORDER BY file_path ASC, session_id ASC
+                """,
+                (tool,),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                obj = json.loads(row["raw_json"])
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+
+    def status(self) -> dict[str, Any]:
+        with closing(self._connect()) as conn:
+            meta = {str(row["key"]): str(row["value"]) for row in conn.execute("SELECT key, value FROM meta")}
+            sources = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT source, entry_count, updated_at_ms
+                    FROM source_state
+                    ORDER BY source
+                    """
+                ).fetchall()
+            ]
+            file_rows = conn.execute(
+                """
+                SELECT
+                    source,
+                    COUNT(*) AS files,
+                    SUM(CASE WHEN missing != 0 THEN 1 ELSE 0 END) AS missing_files,
+                    SUM(entry_count) AS entries
+                FROM file_state
+                GROUP BY source
+                ORDER BY source
+                """
+            ).fetchall()
+            session_rows = conn.execute(
+                """
+                SELECT
+                    tool,
+                    COUNT(*) AS records,
+                    COUNT(DISTINCT session_id) AS sessions,
+                    SUM(CASE WHEN missing != 0 THEN 1 ELSE 0 END) AS missing_records
+                FROM session_records
+                GROUP BY tool
+                ORDER BY tool
+                """
+            ).fetchall()
+            total_entries = conn.execute("SELECT COUNT(*) AS n FROM usage_entries").fetchone()["n"]
+        return {
+            "path": str(self.path),
+            "meta": meta,
+            "usage_entries": int(total_entries or 0),
+            "sources": sources,
+            "files": [dict(row) for row in file_rows],
+            "sessions": [dict(row) for row in session_rows],
+            "durable": durable_usage_db_enabled(),
+        }
+
+    def checkpoint(self) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def repair(self, *, apply: bool = True) -> dict[str, Any]:
+        """Check DB health and repair derived counters when safe.
+
+        This does not try to repair physical SQLite corruption. If SQLite's
+        integrity check fails, callers should run a full resync.
+        """
+        actions: list[str] = []
+        with closing(self._connect()) as conn:
+            quick_rows = conn.execute("PRAGMA quick_check").fetchall()
+            quick_check = [str(row[0]) for row in quick_rows] or ["ok"]
+            integrity_ok = quick_check == ["ok"]
+            total_entries = conn.execute("SELECT COUNT(*) AS n FROM usage_entries").fetchone()["n"]
+            total_sessions = conn.execute("SELECT COUNT(*) AS n FROM session_records").fetchone()["n"]
+
+        if integrity_ok and apply:
+            with usage_db_process_lock(self.path), closing(self._connect()) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    """
+                    UPDATE file_state
+                    SET entry_count = (
+                        SELECT COUNT(*)
+                        FROM usage_entries
+                        WHERE usage_entries.source = file_state.source
+                          AND usage_entries.file_path = file_state.path
+                    )
+                    """
+                )
+                actions.append("recomputed file_state.entry_count")
+                conn.execute(
+                    """
+                    UPDATE source_state
+                    SET entry_count = (
+                        SELECT COUNT(*)
+                        FROM usage_entries
+                        WHERE usage_entries.source = source_state.source
+                    )
+                    """
+                )
+                actions.append("recomputed source_state.entry_count")
+                conn.execute("COMMIT")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                actions.append("checkpointed WAL")
+                total_entries = conn.execute("SELECT COUNT(*) AS n FROM usage_entries").fetchone()["n"]
+                total_sessions = conn.execute("SELECT COUNT(*) AS n FROM session_records").fetchone()["n"]
+        elif integrity_ok:
+            actions.append("dry-run: counters and WAL checkpoint not changed")
+
+        return {
+            "ok": bool(integrity_ok),
+            "path": str(self.path),
+            "quick_check": quick_check,
+            "usage_entries": int(total_entries or 0),
+            "session_records": int(total_sessions or 0),
+            "actions": actions,
+            "recommendation": "run `tokdash db resync`" if not integrity_ok else "",
+        }
+
+    def _where(
+        self,
+        *,
+        sources: Optional[Iterable[str]] = None,
+        since: Optional[datetime] = None,
+        until: Optional[datetime] = None,
+    ) -> tuple[list[str], list[Any]]:
+        where: list[str] = []
+        args: list[Any] = []
+
+        source_list = [s for s in (sources or []) if s]
+        if source_list:
+            placeholders = ",".join("?" for _ in source_list)
+            where.append(f"source IN ({placeholders})")
+            args.extend(source_list)
+
+        if since is not None:
+            where.append("timestamp >= ?")
+            args.append(_timestamp_ms(since))
+        if until is not None:
+            where.append("timestamp < ?")
+            args.append(_timestamp_ms(until))
+        return where, args
+
+
+def _cache_hit_rate(tokens_in: Any, tokens_cache: Any) -> Optional[float]:
+    num = int(tokens_cache or 0)
+    den = int(tokens_in or 0) + num
+    if den <= 0:
+        return None
+    return round(num / den, 4)

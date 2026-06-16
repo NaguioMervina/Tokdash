@@ -34,6 +34,10 @@
   <b>Try it without installing → <a href="https://tokdash.github.io/demo/">tokdash.github.io/demo</a></b>
 </p>
 
+<p align="center">
+  <b>v0.6.0: about 30× faster than pre-0.6.0 cold usage scans, and 15× faster than ccusage in the same local benchmark.</b>
+</p>
+
 > [!IMPORTANT]
 > **Keep your history:** Claude Code and Gemini CLI delete local sessions older than ~30 days by default, so Tokdash's earlier months can silently shrink — a one-line config change per client prevents it ([History retention](#history-retention)).
 
@@ -116,23 +120,8 @@ tokdash serve
 
 Open: `http://localhost:55423`
 
-### Run (from source)
-
-```bash
-pip install -e .
-
-# Option A: run directly
-python3 main.py
-
-# Option B: CLI wrapper (same server)
-./tokdash serve
-```
-
-Open: `http://localhost:55423`
-
 If port conflicts:
-- `python3 main.py --port <port>`
-- `./tokdash serve --port <port>`
+- `tokdash serve --port <port>`
 
 If you want to access Tokdash from another device (recommended):
 - Tailscale Serve (private to your tailnet): `tailscale serve 55423`
@@ -240,6 +229,28 @@ Tokdash is **localhost-only by default**.
 - `TOKDASH_ALLOW_ORIGIN_REGEX` (default allows only localhost/127.0.0.1)
 - `TOKDASH_NO_RETENTION_NOTICE` (set to `1` to silence the history-retention reminder printed on `tokdash serve`)
 
+Persistent usage DB (default on):
+
+Tokdash maintains a local SQLite index at `~/.tokdash/usage.sqlite3` by default. It stores parsed token rows and Codex/Claude session summaries so repeated dashboard and API reads can use indexed SQL instead of reparsing every source log. Source logs remain the source of truth; the DB is a local performance index, and Tokdash falls back to live parsing if it is disabled or unavailable.
+
+- `TOKDASH_USAGE_DB` (default: `1`) — set to `0`, `false`, `no`, or `off` to disable the persistent usage DB
+- `TOKDASH_DATA_DIR` (default: `~/.tokdash`) — base directory for Tokdash local state
+- `TOKDASH_USAGE_DB_PATH` (default: `$TOKDASH_DATA_DIR/usage.sqlite3`) — explicit SQLite file path
+- `TOKDASH_USAGE_DB_DURABLE` (default: `1`) — keep already indexed rows if a source file temporarily disappears or a parser returns no rows; set to `0` for strict source replacement
+- `TOKDASH_USAGE_DB_WATCH` (default: `0`) — set to `1` to run a background sync loop inside `tokdash serve`
+- `TOKDASH_USAGE_DB_WATCH_INTERVAL` (default: `30` seconds) — sync interval for `tokdash db watch` and the serve-time watch loop
+
+DB maintenance commands:
+
+```bash
+tokdash db status --pretty
+tokdash db sync --pretty
+tokdash db verify --verify-period today --pretty
+tokdash db repair --dry-run --pretty
+tokdash db resync --pretty
+tokdash db watch --pretty
+```
+
 Example (remote access via Tailscale Serve; recommended):
 
 ```bash
@@ -279,7 +290,7 @@ Token counts depend on what each client logs locally. Costs are computed from `s
 
 ## History retention
 
-Tokdash reads each client's **local** session logs and keeps no store of its own, so if a client deletes its old logs, that usage disappears from Tokdash too — a past month can read **lower than when you first recorded it**. Only two supported clients do this by default, and both are a one-line fix:
+Tokdash reads each client's **local** session logs and also keeps a local SQLite performance index. The index can keep rows Tokdash has already seen, but it cannot recover logs that were deleted before they were indexed, and it is not a replacement for keeping the original client history. If a client deletes old logs before Tokdash syncs them, a past month can still read **lower than when you first recorded it**. Only two supported clients do this by default, and both are a one-line fix:
 
 - **Claude Code** deletes sessions older than `cleanupPeriodDays` (**default 30 days**) at startup. Add this to your existing `~/.claude/settings.json` (and any alternate `CLAUDE_CONFIG_DIR`):
   ```json
@@ -290,7 +301,7 @@ Tokdash reads each client's **local** session logs and keeps no store of its own
   { "general": { "sessionRetention": { "enabled": false } } }
   ```
 
-Every other supported client keeps history indefinitely by default. For the full per-client survey, fix details, and why Tokdash doesn't ship its own snapshot store, see **[docs/HISTORY_RETENTION.md](docs/HISTORY_RETENTION.md)**.
+Every other supported client keeps history indefinitely by default. For the full per-client survey, fix details, and what the local SQLite index does and does not preserve, see **[docs/HISTORY_RETENTION.md](docs/HISTORY_RETENTION.md)**.
 
 ## Roadmap
 

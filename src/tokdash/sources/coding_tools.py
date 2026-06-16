@@ -12,6 +12,7 @@ import re
 import sqlite3
 import time as _time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
@@ -31,6 +32,22 @@ except ImportError:  # pragma: no cover
 _sig_cache: Dict[str, Tuple[float, tuple]] = {}
 _SIG_TTL = float(os.environ.get("TOKDASH_SIG_TTL", "5.0"))  # seconds; 0 to disable
 _OPENCODE_QUERY_CACHE_MAX = 32  # max date-range entries before eviction
+
+
+@dataclass(frozen=True)
+class SourceSyncCapability:
+    """Persistent-DB sync behavior declared by each parser.
+
+    mode:
+      - file_replace: unchanged files stay indexed; changed files are reparsed.
+      - source_replace: source-wide replacement is required for correctness.
+      - source_native_db: do not copy into the Tokdash usage store; query source DB.
+    """
+
+    mode: str = "source_replace"
+    append_jsonl: bool = False
+    session_store: bool = False
+    reason: str = ""
 
 
 def _timed_sigs(cache_key: str, scan_fn) -> tuple:
@@ -72,6 +89,7 @@ def _glob_sigs(pattern: str) -> tuple:
 
 class BaseParser(ABC):
     source_name: str
+    sync_capability = SourceSyncCapability()
 
     # Shared across all instances:
     #   {source_name: ((file_sigs, pricing_sig), [entries])}
@@ -162,6 +180,11 @@ class BaseParser(ABC):
 
 class OpenCodeParser(BaseParser):
     source_name = "opencode"
+    sync_capability = SourceSyncCapability(
+        mode="source_native_db",
+        session_store=False,
+        reason="OpenCode already stores messages in a large SQLite DB and supports SQL date windows.",
+    )
 
     # Per-query cache: {(s_ms, u_ms): [entries]}, invalidated when DB or pricing changes.
     # Bounded to _OPENCODE_QUERY_CACHE_MAX entries to prevent unbounded growth.
@@ -196,11 +219,14 @@ class OpenCodeParser(BaseParser):
     def _file_signatures(self) -> tuple:
         if not self.db_path.exists():
             return ()
-        try:
-            s = self.db_path.stat()
-            return ((str(self.db_path), s.st_mtime_ns, s.st_size),)
-        except (FileNotFoundError, OSError):
-            return ()
+        out: list[tuple[str, int, int]] = []
+        for candidate in (self.db_path, Path(str(self.db_path) + "-wal"), Path(str(self.db_path) + "-shm")):
+            try:
+                s = candidate.stat()
+                out.append((str(candidate), s.st_mtime_ns, s.st_size))
+            except (FileNotFoundError, OSError):
+                continue
+        return tuple(out)
 
     def _parse_all(self) -> List[Dict[str, Any]]:
         return []  # collect() is overridden; this satisfies the ABC contract
@@ -263,6 +289,11 @@ class OpenCodeParser(BaseParser):
 
 class CodexParser(BaseParser):
     source_name = "codex"
+    sync_capability = SourceSyncCapability(
+        mode="file_replace",
+        session_store=True,
+        reason="Codex JSONL session files can be indexed independently; tail append needs stronger line-offset IDs first.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -291,7 +322,7 @@ class CodexParser(BaseParser):
                 model = "gpt-5.3-codex"
                 provider = "openai"
 
-                for line in session_file.read_text(encoding="utf-8").splitlines():
+                for line_no, line in enumerate(session_file.read_text(encoding="utf-8").splitlines(), start=1):
                     try:
                         msg = json.loads(line)
                     except Exception:
@@ -345,6 +376,7 @@ class CodexParser(BaseParser):
                             "reasoning": reasoning,
                             "cost": self.pricing_db.get_cost(model, input_t, output_t, cache_read, 0),
                             "timestamp": int(ts.timestamp() * 1000),
+                            "entry_id": f"{session_file}:{line_no}",
                         }
                     )
             except Exception:
@@ -355,6 +387,11 @@ class CodexParser(BaseParser):
 
 class ClaudeParser(BaseParser):
     source_name = "claude"
+    sync_capability = SourceSyncCapability(
+        mode="file_replace",
+        session_store=True,
+        reason="Claude streaming snapshots require full-file dedup context; tail append is unsafe.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -441,6 +478,7 @@ class ClaudeParser(BaseParser):
                         "reasoning": 0,
                         "cost": self.pricing_db.get_cost(model, input_t, output_t, cache_r, cache_w),
                         "timestamp": int(ts.timestamp() * 1000),
+                        "entry_id": f"claude:{msg_id}" if msg_id else "",
                     }
                     if not msg_id:
                         out.append(entry)
@@ -529,6 +567,11 @@ class GeminiCLIParser(BaseParser):
     """
 
     source_name = "gemini_cli"
+    sync_capability = SourceSyncCapability(
+        mode="file_replace",
+        append_jsonl=True,
+        reason="Gemini JSONL rows have stable message IDs; JSON array files still fall back to file replacement.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -621,7 +664,9 @@ class GeminiCLIParser(BaseParser):
                     ts = datetime.fromisoformat(ts_str).astimezone(timezone.utc)
                     model = msg.get("model") or "unknown"
                     ts_ms = int(ts.timestamp() * 1000)
-                    out.append(self._build_entry(model, tokens, ts_ms))
+                    entry = self._build_entry(model, tokens, ts_ms)
+                    entry["entry_id"] = f"gemini_cli:{msg_id}"
+                    out.append(entry)
                 except Exception:
                     continue
         return out
@@ -629,6 +674,10 @@ class GeminiCLIParser(BaseParser):
 
 class AmpParser(BaseParser):
     source_name = "amp"
+    sync_capability = SourceSyncCapability(
+        mode="source_replace",
+        reason="Parser placeholder returns no rows until a stable local schema is available.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -679,6 +728,11 @@ class KimiParser(BaseParser):
     """
 
     source_name = "kimi"
+    sync_capability = SourceSyncCapability(
+        mode="file_replace",
+        append_jsonl=True,
+        reason="Kimi wire JSONL rows expose stable message IDs and are append-safe for token usage rows.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -715,6 +769,7 @@ class KimiParser(BaseParser):
             "cost": self.pricing_db.get_cost(model or "kimi-k2.5", input_other, output_t, cache_read, cache_write),
             "timestamp": int(ts_ms),
             "message_id": message_id,  # For deduplication
+            "entry_id": f"kimi:{message_id}",
         }
 
     def _file_signatures(self) -> tuple:
@@ -815,6 +870,10 @@ class PiAgentParser(BaseParser):
     """
 
     source_name = "pi_agent"
+    sync_capability = SourceSyncCapability(
+        mode="file_replace",
+        reason="Pi Agent JSONL rows have stable top-level IDs but are kept on full-file replacement until tail semantics are proven.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -945,6 +1004,7 @@ class PiAgentParser(BaseParser):
                             "reasoning": 0,
                             "cost": cost,
                             "timestamp": int(ts.timestamp() * 1000),
+                            "entry_id": f"pi_agent:{entry_id}" if entry_id else "",
                         })
             except Exception:
                 continue
@@ -984,6 +1044,10 @@ class CopilotCLIParser(BaseParser):
     """
 
     source_name = "copilot_cli"
+    sync_capability = SourceSyncCapability(
+        mode="source_replace",
+        reason="OTel rows can suppress fallback events across files, so cross-file precedence must be preserved.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -1230,6 +1294,7 @@ class CopilotCLIParser(BaseParser):
                 "reasoning": tokens["reasoning"],
                 "cost": cost,
                 "timestamp": ts_ms,
+                "entry_id": str(attrs.get("gen_ai.response.id") or rec.get("traceId") or ""),
             }
 
         # ChatSpan: always emit
@@ -1380,6 +1445,7 @@ class CopilotCLIParser(BaseParser):
                             "reasoning": 0,
                             "cost": self.pricing_db.get_cost(model, 0, output_t, 0, 0),
                             "timestamp": ts_ms,
+                            "entry_id": f"copilot_event:{dedup_key}" if dedup_key else "",
                         })
             except Exception:
                 continue
@@ -1423,6 +1489,10 @@ class HermesParser(BaseParser):
     """
 
     source_name = "hermes"
+    sync_capability = SourceSyncCapability(
+        mode="source_replace",
+        reason="Hermes is DB-backed; current safe cache unit is the whole source until DB-native incremental sync is added.",
+    )
 
     def __init__(self, pricing_db: PricingDatabase):
         super().__init__(pricing_db)
@@ -1560,6 +1630,7 @@ class HermesParser(BaseParser):
                             # so compute.py credits sessions correctly instead
                             # of treating each row as a single message.
                             "messageCount": int(self._i(message_count)),
+                            "entry_id": f"hermes:{row_id}",
                         })
                     except Exception:
                         continue
