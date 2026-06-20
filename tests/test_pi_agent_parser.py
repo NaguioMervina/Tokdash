@@ -142,6 +142,45 @@ def test_pi_agent_parser_dedup(monkeypatch, tmp_path):
     assert len(entries) == 1
 
 
+def _pi_lines(session_id, message_id):
+    return "\n".join([
+        json.dumps({"type": "session", "id": session_id, "cwd": "/home/user/project"}),
+        json.dumps({
+            "type": "message",
+            "id": message_id,
+            "timestamp": "2026-05-21T20:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "MiniMax-M2.7",
+                "provider": "minimax-cn",
+                "usage": {"input": 100, "output": 50, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 150},
+            },
+        }),
+    ]) + "\n"
+
+
+def test_pi_agent_parser_dedup_scoped_by_session(monkeypatch, tmp_path):
+    """An 8-char id colliding across different sessions keeps both rows; a genuine
+    duplicate within the same session is still removed."""
+    pi_dir = tmp_path / "pi-agent"
+    pi_dir.mkdir(parents=True)
+
+    # Same message id in two DIFFERENT sessions → collision, both must survive.
+    (pi_dir / "sess-a.jsonl").write_text(_pi_lines("session-a", "deadbeef"), encoding="utf-8")
+    (pi_dir / "sess-b.jsonl").write_text(_pi_lines("session-b", "deadbeef"), encoding="utf-8")
+    # Same message id duplicated across two files of the SAME session → dedup to one.
+    (pi_dir / "sess-c-1.jsonl").write_text(_pi_lines("session-c", "cafef00d"), encoding="utf-8")
+    (pi_dir / "sess-c-2.jsonl").write_text(_pi_lines("session-c", "cafef00d"), encoding="utf-8")
+
+    monkeypatch.setenv("PI_AGENT_DIR", str(pi_dir))
+    _sig_cache.clear()
+    BaseParser._entry_cache.clear()
+
+    entries = PiAgentParser(PricingDatabase()).collect(None, None)
+    # 2 collision rows (a, b) + 1 deduped row (c) = 3
+    assert len(entries) == 3
+
+
 def test_pi_agent_parser_totals_fallback(monkeypatch, tmp_path):
     """When all breakdown tokens are zero but totalTokens > 0, output gets the total."""
     pi_dir = tmp_path / "pi-agent"

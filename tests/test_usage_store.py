@@ -547,6 +547,31 @@ def test_codex_guardian_sessions_are_hidden_from_session_view_only(monkeypatch, 
     assert len(codex_entries) == 2
 
 
+def test_codex_sessions_echo_effective_review_default(monkeypatch, tmp_path):
+    """The response echoes the effective review-session default so the dashboard
+    toggle can adopt the server's TOKDASH_INCLUDE_CODEX_GUARDIAN default."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    codex_dir = tmp_path / ".codex" / "sessions" / "2026" / "06" / "19"
+    _write_jsonl(codex_dir / "normal.jsonl", _codex_session_rows("normal-session"))
+
+    def effective(env_value, param):
+        if env_value is None:
+            monkeypatch.delenv("TOKDASH_INCLUDE_CODEX_GUARDIAN", raising=False)
+        else:
+            monkeypatch.setenv("TOKDASH_INCLUDE_CODEX_GUARDIAN", env_value)
+        _clear_parser_caches()
+        return sessions_module.get_sessions_data(
+            "codex", "today", "2026-06-19", "2026-06-19", include_review_sessions=param
+        )["include_review_sessions"]
+
+    # Explicit param wins over the env default.
+    assert effective(None, True) is True
+    assert effective("1", False) is False
+    # When the param is omitted, the env default decides.
+    assert effective(None, None) is False
+    assert effective("1", None) is True
+
+
 def test_session_display_name_fallbacks(monkeypatch, tmp_path):
     _clear_parser_caches()
 

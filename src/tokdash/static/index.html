@@ -1646,7 +1646,14 @@
     let pricingDbLastText = '';
     const MAX_COMBINED_MODELS_ROWS = 300;
     let combinedModelsShowAll = false;
-    let includeCodexReviewSessions = localStorage.getItem('tokdash-show-codex-review-sessions') === '1';
+    // Tri-state: true/false once the user toggles, null when never set so the
+    // server default (TOKDASH_INCLUDE_CODEX_GUARDIAN) decides. codexReviewDefault
+    // mirrors the effective server default echoed by the codex sessions response.
+    let includeCodexReviewSessions = (() => {
+      const stored = localStorage.getItem('tokdash-show-codex-review-sessions');
+      return stored === '1' ? true : stored === '0' ? false : null;
+    })();
+    let codexReviewDefault = false;
     let statsWarmScheduled = false;
     const THEME_CONFIG = window.TOKDASH_THEME_CONFIG || {};
     const DEFAULT_HEAT_COLORS_LIGHT = ['#EEF2F7','#E0E7FF','#C7D2FE','#A5B4FC','#60A5FA','#3B82F6','#2563EB','#1E40AF'];
@@ -2420,7 +2427,8 @@
 
     function syncCodexReviewToggle() {
       const toggle = document.getElementById('codexReviewToggle');
-      if (toggle) toggle.checked = includeCodexReviewSessions;
+      if (!toggle) return;
+      toggle.checked = includeCodexReviewSessions === null ? codexReviewDefault : includeCodexReviewSessions;
     }
 
     function applyI18n() {
@@ -2831,11 +2839,18 @@
       return `p:${customDays ? String(customDays) : 'today'}`;
     }
 
+    function sessionRequestKeyFor(tool, customDays, dateFrom, dateTo) {
+      const reviewState = tool === 'codex'
+        ? (includeCodexReviewSessions === null ? 'server' : String(includeCodexReviewSessions))
+        : 'n/a';
+      return `${tool}:${windowKeyFor(customDays, dateFrom, dateTo)}:review=${reviewState}`;
+    }
+
     function sessionUrlForTool(tool, customDays, dateFrom, dateTo) {
       const params = (dateFrom && dateTo)
         ? `date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`
         : `period=${encodeURIComponent(customDays ? String(customDays) : 'today')}`;
-      const reviewParam = tool === 'codex'
+      const reviewParam = (tool === 'codex' && includeCodexReviewSessions !== null)
         ? `&include_review_sessions=${includeCodexReviewSessions ? 'true' : 'false'}`
         : '';
       return `/api/sessions?tool=${encodeURIComponent(tool)}&${params}${reviewParam}`;
@@ -2845,19 +2860,32 @@
       const responses = {};
       const errors = {};
       for (const tool of SESSION_TOOL_KEYS) {
+        const requestKey = sessionRequestKeyFor(tool, customDays, dateFrom, dateTo);
         try {
-          responses[tool] = await fetchJsonWithRetry(sessionUrlForTool(tool, customDays, dateFrom, dateTo));
+          responses[tool] = {
+            ...(await fetchJsonWithRetry(sessionUrlForTool(tool, customDays, dateFrom, dateTo))),
+            _request_key: requestKey,
+          };
         } catch (error) {
           console.error(`Error fetching ${tool} sessions:`, error);
           errors[tool] = error;
-          responses[tool] = {
-            tool,
-            tool_label: formatToolName(tool),
-            latest_session: null,
-            sessions: [],
-            summary: { session_count: 0, tokens: 0, cost: 0 },
-            error: error?.message || String(error),
-          };
+          // Keep the last good data so one tool's outage does not blank its panel
+          // or silently undercount Combined Sessions, but only for the same
+          // date range and Codex review toggle state.
+          const previous = lastSessionsResponses?.[tool];
+          if (previous?._request_key === requestKey && Array.isArray(previous.sessions) && previous.sessions.length) {
+            responses[tool] = { ...previous, stale: true, error: error?.message || String(error) };
+          } else {
+            responses[tool] = {
+              tool,
+              tool_label: formatToolName(tool),
+              latest_session: null,
+              sessions: [],
+              summary: { session_count: 0, tokens: 0, cost: 0 },
+              error: error?.message || String(error),
+              _request_key: requestKey,
+            };
+          }
         }
       }
       responses.combined = buildCombinedSessionsData(responses);
@@ -3065,6 +3093,18 @@
       return row;
     }
 
+    function createErrorRow(colSpan, message) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = colSpan;
+      cell.className = "text-center py-10";
+      cell.style.color = "var(--color-danger, #dc2626)";
+      cell.textContent = t("loadFailed");
+      if (message) cell.title = String(message);
+      row.appendChild(cell);
+      return row;
+    }
+
     function createTableCell(tag, className, text, style = null) {
       const cell = document.createElement(tag);
       cell.className = className;
@@ -3186,7 +3226,9 @@
       const tbody = document.getElementById(`${prefix}SessionsTable`);
       if (!tbody) return;
       if (!sessions.length) {
-        tbody.replaceChildren(createNoDataRow(showTool ? 10 : 9));
+        tbody.replaceChildren(
+          data?.error ? createErrorRow(showTool ? 10 : 9, data.error) : createNoDataRow(showTool ? 10 : 9)
+        );
         updateSortArrows(prefix);
         return;
       }
@@ -3308,6 +3350,12 @@
 
     function renderSessionsTab() {
       if (!hasLoadedSessionResponses()) return;
+      // Adopt the server's effective review-session default until the user opts in.
+      const codexResp = lastSessionsResponses?.codex;
+      if (codexResp && typeof codexResp.include_review_sessions === 'boolean') {
+        codexReviewDefault = codexResp.include_review_sessions;
+        if (includeCodexReviewSessions === null) syncCodexReviewToggle();
+      }
       updateSessionPanel("codex", lastSessionsResponses.codex);
       updateSessionPanel("claude", lastSessionsResponses.claude);
       updateSessionPanel("opencode", lastSessionsResponses.opencode);

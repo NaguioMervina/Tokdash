@@ -1270,6 +1270,9 @@ def get_sessions_data(
             "tokens": sum(int(row.get("tokens", 0) or 0) for row in sessions),
             "cost": sum(float(row.get("cost", 0.0) or 0.0) for row in sessions),
         },
+        # Echo the effective review-session default (param, else TOKDASH_INCLUDE_CODEX_GUARDIAN)
+        # so the dashboard toggle can reflect the server default before the user opts in.
+        "include_review_sessions": include_codex_review,
         "timestamp": datetime.now().isoformat(),
     }
 

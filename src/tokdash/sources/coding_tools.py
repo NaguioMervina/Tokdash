@@ -917,12 +917,17 @@ class PiAgentParser(BaseParser):
 
     def _parse_all(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
+        # Dedup by (session id, message id). Scoping on session id removes genuine
+        # duplicates of a message (e.g. the same row re-logged across files on resume)
+        # while avoiding dropping rows when Pi's 8-char hex message ids collide across
+        # different sessions at scale — which would diverge from the session view.
         seen_ids: set = set()
 
         for path_str, _, _ in self._file_signatures():
             try:
                 cur_model = ""
                 cur_provider = ""
+                cur_session_id = ""
                 with open(path_str, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
@@ -934,6 +939,11 @@ class PiAgentParser(BaseParser):
                             continue
 
                         msg_type = obj.get("type")
+
+                        # Track the current session so dedup is scoped per session.
+                        if msg_type == "session":
+                            cur_session_id = str(obj.get("id") or cur_session_id)
+                            continue
 
                         # Track model changes
                         if msg_type == "model_change":
@@ -951,12 +961,13 @@ class PiAgentParser(BaseParser):
                         if not usage:
                             continue
 
-                        # Dedup by outer id
+                        # Dedup by (session id, outer id)
                         entry_id = obj.get("id")
-                        if entry_id in seen_ids:
-                            continue
                         if entry_id:
-                            seen_ids.add(entry_id)
+                            dedup_key = (cur_session_id, entry_id)
+                            if dedup_key in seen_ids:
+                                continue
+                            seen_ids.add(dedup_key)
 
                         # Parse timestamp
                         ts_raw = obj.get("timestamp")
