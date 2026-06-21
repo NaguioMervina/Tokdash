@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 1.0.0 - 2026-06-21
+
+### Added
+- Python-native lifecycle commands: `tokdash setup`, `doctor`, `update`, and `uninstall`. `setup` configures a reversible user-level background service (systemd user service on Linux/WSL2, launchd LaunchAgent on macOS) with no shell scripts and no `sudo`; `doctor` diagnoses runtime/service/port health; `update` upgrades a setup-owned runtime (pipx or managed venv) in place and restarts the service; `uninstall` reverses exactly what setup created, driven by a `<data_dir>/install.json` manifest and ownership markers, keeping usage history unless `--purge`. All commands support `--auto`/`--json` for bundlers and `--dry-run`. See `docs/ONBOARDING.md`.
+- Optional, default-off update check (`TOKDASH_UPDATE_CHECK=1` or persisted consent via `POST /api/update-check/consent`): `tokdash doctor` and `POST /api/update-check` report whether a newer version is on PyPI (PEP 440 comparison). No automatic background checks; it only reports, never upgrades.
+- Dashboard pricing edits now persist to a user override at `<data_dir>/pricing_db.json` instead of the packaged baseline, so they survive `tokdash update` / a pip reinstall and work on a read-only install. The override fully replaces the baseline (WYSIWYG: deletions stick); a missing/corrupt override falls back to the shipped baseline.
+
+### Changed
+- README Quick start now uses the onboarding lifecycle (`tokdash setup` / `doctor` / `update` / `uninstall`) as the default path and removes the old manual systemd/update walkthrough from the main flow.
+- Human onboarding output now uses terminal colors when stdout is a real TTY, while `--json` and captured/scripted output remain plain.
+
+### Fixed
+- Dashboard pricing edits now correctly invalidate pricing-dependent API responses, coding-tools and OpenClaw cost caches, session pricing, and the persistent usage store, so edited rates take effect immediately across Overview/Usage/Tools; previously those layers could keep serving stale costs after an edit or out-of-band override change.
+- `tokdash setup` now verifies that systemd loaded the unit file setup wrote and that the configured port answers with Tokdash's `/health` fingerprint before reporting success; `doctor` flags service/port mismatches, and `uninstall` will not stop a same-named foreign systemd service while cleaning up a setup-written unit.
+- `tokdash setup --force` can now migrate pre-1.0 manual `tokdash.service` installs that already occupy the target port but lack the new `/health` fingerprint; setup rewrites and restarts the unit before readiness probing.
+- Interactive `tokdash setup` now handles Tailscale's "serve config denied" failure by offering the one-time `sudo tailscale set --operator=$USER` operator grant and retrying `tailscale serve`.
+- After a successful interactive Tailscale Serve setup, `tokdash setup` now prints and records the actual `https://...ts.net/tokdash` URL from `tailscale serve status`, uses a path-scoped Serve rule so the tailnet host root remains available for other services, and hides the generic remote-access hint from the final success output.
+- `tokdash uninstall` no longer reports success (and deletes the manifest) when a systemd/launchd stop fails: a failed stop is recorded as an error, leaving the unit and manifest in place for retry.
+- `tokdash update` reports a failed service restart with the platform-correct remediation command instead of crashing with a traceback when `systemctl`/`launchctl` hangs.
+- The write-protection gate returns `403` (not `500`) on a malformed `Referer` header.
+
 ## 0.6.2 - 2026-06-19
 
 ### Added

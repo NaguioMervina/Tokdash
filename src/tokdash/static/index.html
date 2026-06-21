@@ -6,8 +6,23 @@
   <meta name="theme-color" content="#1E40AF" />
   <title>Tokdash</title>
 
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="icon" href="/static/icons/icon-192.png" sizes="192x192" />
+  <script>
+    window.TOKDASH_BASE_PATH = (() => {
+      const configured = "__TOKDASH_BASE_PATH__";
+      if (configured && configured.startsWith("/")) return configured.replace(/\/+$/, "");
+      const path = window.location.pathname || "/";
+      return (path === "/tokdash" || path.startsWith("/tokdash/")) ? "/tokdash" : "";
+    })();
+    window.tokdashPath = (path) => `${window.TOKDASH_BASE_PATH || ""}${path}`;
+    window.tokdashAssetWithBase = (path) => {
+      const url = window.tokdashPath(path);
+      return window.TOKDASH_BASE_PATH
+        ? `${url}?base=${encodeURIComponent(window.TOKDASH_BASE_PATH)}`
+        : url;
+    };
+    document.write(`<link rel="manifest" href="${window.tokdashAssetWithBase('/manifest.webmanifest')}" />`);
+    document.write(`<link rel="icon" href="${window.tokdashPath('/static/icons/icon-192.png')}" sizes="192x192" />`);
+  </script>
 
   <!-- Fonts (Design System: Fira Code / Fira Sans) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -707,7 +722,7 @@
       * { transition: none !important; scroll-behavior: auto !important; }
     }
   </style>
-  <link rel="stylesheet" href="/static/themes.css" />
+  <script>document.write(`<link rel="stylesheet" href="${window.tokdashPath('/static/themes.css')}" />`);</script>
 </head>
 
 <body class="p-4 sm:p-6 lg:p-8">
@@ -718,7 +733,7 @@
       <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
         <div class="flex items-start gap-4">
           <div class="h-11 w-11 flex items-center justify-center">
-            <img src="/static/icons/logo.png" alt="Tokdash logo" width="44" height="44" style="display:block; width:44px; height:44px; object-fit:contain;" />
+            <script>document.write(`<img src="${window.tokdashPath('/static/icons/logo.png')}" alt="Tokdash logo" width="44" height="44" style="display:block; width:44px; height:44px; object-fit:contain;" />`);</script>
           </div>
           <div>
             <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight mono">Tokdash</h1>
@@ -1490,6 +1505,7 @@
           <div>
             <h2 class="text-base font-extrabold mono" data-i18n="pricingDb">Pricing</h2>
             <div id="pricingDbPath" class="text-xs mono mt-1 break-all" style="color: var(--color-muted);">pricing_db.json</div>
+            <div id="pricingDbSource" class="text-xs mono mt-1 break-all" style="color: var(--color-muted);"></div>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <div id="pricingDbStatus" class="text-sm font-semibold mr-1" style="color: var(--color-muted);" data-i18n="loading">Loading…</div>
@@ -1618,8 +1634,11 @@
     </div>
   </div>
 
-  <script src="/static/theme-config.js"></script>
+  <script>document.write(`<script src="${window.tokdashPath('/static/theme-config.js')}"><\/script>`);</script>
   <script>
+    const TOKDASH_BASE_PATH = window.TOKDASH_BASE_PATH || "";
+    const appPath = window.tokdashPath || ((path) => `${TOKDASH_BASE_PATH}${path}`);
+    const appAssetWithBase = window.tokdashAssetWithBase || ((path) => appPath(path));
     // Dashboard v3.12.0 - sessions tab + i18n + dark mode
     // - "Streak" label (not "Current Streak")
     // - Month/Year: streak within that view period
@@ -1644,6 +1663,7 @@
     let pricingDbLoaded = false;
     let pricingDbDirty = false;
     let pricingDbLastText = '';
+    let pricingDbLastPayload = null;  // last GET/PUT payload, so the source line can re-localize
     const MAX_COMBINED_MODELS_ROWS = 300;
     let combinedModelsShowAll = false;
     // Tri-state: true/false once the user toggles, null when never set so the
@@ -1736,6 +1756,9 @@
         invalidJson: 'Invalid JSON',
         unsavedChanges: 'Unsaved changes',
         saved: 'Saved',
+        pricingSourceBaseline: 'Editing bundled defaults — saving creates a local override',
+        pricingSourceOverride: 'Local override active (fully replaces bundled rates)',
+        pricingForkedFrom: 'bundled baseline is now v{v}; delete the override to resume updates',
         totalTokens: 'Total Tokens',
         totalCost: 'Total Cost',
         totalMessages: 'Total Messages',
@@ -1900,6 +1923,9 @@
         invalidJson: 'JSON 无效',
         unsavedChanges: '未保存',
         saved: '已保存',
+        pricingSourceBaseline: '正在编辑内置默认价格 —— 保存将创建本地覆盖',
+        pricingSourceOverride: '本地覆盖已生效（完全替换内置费率）',
+        pricingForkedFrom: '内置基线现为 v{v}；删除覆盖文件可恢复自动更新',
         totalTokens: '总 Token 数',
         totalCost: '总费用',
         totalMessages: '总消息数',
@@ -2457,6 +2483,9 @@
       }
       const langBtn = document.getElementById('langToggle');
       if (langBtn) langBtn.textContent = currentLang === 'zh' ? 'EN' : '中';
+      // The pricing source line is set imperatively (no data-i18n), so re-derive it from the
+      // last payload on a language switch — otherwise it stays frozen in the prior language.
+      if (pricingDbLastPayload) setPricingDbSource(pricingDbLastPayload);
       renderRefreshButton();
       syncCodexReviewToggle();
       updateTimestamp();
@@ -2853,7 +2882,7 @@
       const reviewParam = (tool === 'codex' && includeCodexReviewSessions !== null)
         ? `&include_review_sessions=${includeCodexReviewSessions ? 'true' : 'false'}`
         : '';
-      return `/api/sessions?tool=${encodeURIComponent(tool)}&${params}${reviewParam}`;
+      return `${appPath('/api/sessions')}?tool=${encodeURIComponent(tool)}&${params}${reviewParam}`;
     }
 
     async function fetchSessionsResponses(customDays, dateFrom, dateTo) {
@@ -2899,11 +2928,11 @@
       let usageApiUrl;
       if (dateFrom && dateTo) {
         // Use specific date range
-        usageApiUrl = `/api/usage?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`;
+        usageApiUrl = `${appPath('/api/usage')}?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`;
       } else {
         // Use period-based query
         let periodValue = customDays ? String(customDays) : 'today';
-        usageApiUrl = `/api/usage?period=${encodeURIComponent(periodValue)}`;
+        usageApiUrl = `${appPath('/api/usage')}?period=${encodeURIComponent(periodValue)}`;
       }
 
       const windowKey = windowKeyFor(customDays, dateFrom, dateTo);
@@ -3572,7 +3601,7 @@
       document.getElementById("sessionModalReasoningPct").textContent = "-";
 
       try {
-        const response = await fetch(`/api/session?tool=${encodeURIComponent(tool)}&session_id=${encodeURIComponent(sessionId)}`);
+        const response = await fetch(`${appPath('/api/session')}?tool=${encodeURIComponent(tool)}&session_id=${encodeURIComponent(sessionId)}`);
         const data = await response.json();
         const session = data.session || {};
         const turns = data.turns || [];
@@ -4023,6 +4052,26 @@
       });
     }
 
+    function setPricingDbSource(payload) {
+      // Make the full-replacement trade-off explicit: when no override exists yet the editor
+      // is showing the read-only bundled baseline (saving FORKS it); once an override exists
+      // it fully replaces the bundled rates and freezes them at baseline_version.
+      pricingDbLastPayload = payload || null;  // remember it so applyI18n can re-localize
+      const el = document.getElementById('pricingDbSource');
+      if (!el) return;
+      const source = payload && payload.source;
+      const baseVer = payload && payload.baseline_version;
+      if (source === 'override') {
+        let msg = t('pricingSourceOverride');
+        if (baseVer) msg += ' — ' + t('pricingForkedFrom').replace('{v}', baseVer);
+        el.textContent = msg;
+        el.style.color = '#D97706';
+      } else {
+        el.textContent = t('pricingSourceBaseline');
+        el.style.color = 'var(--color-muted)';
+      }
+    }
+
     function updatePricingDbSummary(data) {
       const models = data && typeof data.models === 'object' && data.models !== null ? data.models : {};
       const aliases = data && typeof data.aliases === 'object' && data.aliases !== null ? data.aliases : {};
@@ -4058,7 +4107,7 @@
       setPricingDbBusy(true);
       setPricingDbStatus(t('loading'));
       try {
-        const response = await fetch('/api/pricing-db');
+        const response = await fetch(appPath('/api/pricing-db'));
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || response.statusText);
         const editor = document.getElementById('pricingDbEditor');
@@ -4067,6 +4116,7 @@
         pricingDbLoaded = true;
         pricingDbDirty = false;
         document.getElementById('pricingDbPath').textContent = payload.path || 'pricing_db.json';
+        setPricingDbSource(payload);
         updatePricingDbSummary(payload.data || {});
         setPricingDbJsonState(t('validJson'), 'var(--color-cost)');
         setPricingDbStatus(t('saved'), 'var(--color-muted)');
@@ -4102,9 +4152,17 @@
       setPricingDbBusy(true);
       setPricingDbStatus(t('loading'));
       try {
-        const response = await fetch('/api/pricing-db', {
+        // Fetch the per-session write token (same-origin) and echo it back so the
+        // server's write guard accepts this mutation. The token is fetched fresh each
+        // time (it rotates every server restart) — /api/ is never service-worker-cached.
+        let csrfToken = '';
+        try {
+          const tokenResp = await fetch(appPath('/api/csrf-token'));
+          if (tokenResp.ok) csrfToken = (await tokenResp.json()).token || '';
+        } catch (e) { /* fall through; the PUT will 403 with a clear message */ }
+        const response = await fetch(appPath('/api/pricing-db'), {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Tokdash-Token': csrfToken },
           body: JSON.stringify({ data }),
         });
         const payload = await response.json();
@@ -4113,6 +4171,8 @@
         if (editor) editor.value = payload.text || JSON.stringify(payload.data || {}, null, 2);
         pricingDbLastText = editor ? editor.value : '';
         pricingDbDirty = false;
+        if (payload.path) document.getElementById('pricingDbPath').textContent = payload.path;
+        setPricingDbSource(payload);
         updatePricingDbSummary(payload.data || {});
         setPricingDbJsonState(t('validJson'), 'var(--color-cost)');
         setPricingDbStatus(t('saved'), 'var(--color-muted)');
@@ -4219,7 +4279,7 @@
       const seq = ++statsLoadSeq;
       if (!statsLoaded) setStatsStatus('loading');
       try {
-        const data = await fetchJsonWithRetry('/api/stats');
+        const data = await fetchJsonWithRetry(appPath('/api/stats'));
         if (seq !== statsLoadSeq) return; // a newer load superseded this one
 
         const stats = data.stats || {};
@@ -4257,7 +4317,7 @@
       statsWarmScheduled = true;
       setTimeout(() => {
         scheduleIdle(() => {
-          fetchJsonWithRetry('/api/stats', {}, { attempts: 2, baseDelayMs: 600 }).catch(() => {
+          fetchJsonWithRetry(appPath('/api/stats'), {}, { attempts: 2, baseDelayMs: 600 }).catch(() => {
             statsWarmScheduled = false;
           });
         }, 1500);
@@ -4269,7 +4329,7 @@
       if (statsCache.pendingYears.has(year)) return statsCache.pendingYears.get(year);
 
       const promise = (async () => {
-        const data = await fetchJsonWithRetry(`/api/stats?year=${year}`);
+        const data = await fetchJsonWithRetry(`${appPath('/api/stats')}?year=${year}`);
         const filled = fillYearDays(data.contributions || [], year);
         statsCache.years.set(year, filled);
         return filled;
@@ -5514,7 +5574,7 @@
     // PWA install support (Android/Chrome requires manifest + service worker).
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {});
+        navigator.serviceWorker.register(appAssetWithBase('/sw.js'), { updateViaCache: 'none' }).catch(() => {});
       });
     }
 

@@ -55,7 +55,7 @@ def test_has_display_false_in_ci(monkeypatch):
 
 def test_has_display_false_under_ssh(monkeypatch):
     monkeypatch.delenv("CI", raising=False)
-    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
+    monkeypatch.setenv("SSH_CONNECTION", "192.0.2.1 22 198.51.100.2 22")
     assert cli._has_display() is False
 
 

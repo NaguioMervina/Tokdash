@@ -241,10 +241,14 @@ def _collect_entries(session_dirs: list[str]) -> List[Dict[str, Any]]:
 
 
 def _pricing_signature(pricing_db: PricingDatabase) -> tuple:
+    # Cover BOTH the packaged baseline AND the data-dir override (PricingDatabase.signature()
+    # stats both and is OSError-safe). A dashboard pricing edit writes only the override, so
+    # statting the baseline alone would never bust this cache — and because this same
+    # signature gates the persistent SQLite usage store, the stale costs would survive a
+    # process restart until a source log file changed on disk.
     try:
-        s = pricing_db.db_path.stat()
-        return (s.st_mtime_ns, s.st_size)
-    except (FileNotFoundError, OSError, AttributeError):
+        return tuple(pricing_db.signature())
+    except (OSError, AttributeError):
         return ()
 
 

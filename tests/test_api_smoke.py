@@ -169,22 +169,37 @@ def test_api_endpoints_and_dashboard_smoke(synthetic_api_data):
     manifest = (api.STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8")
     assert "Tokdash" in manifest
 
-    sw_response = asyncio.run(api.serve_service_worker())
-    assert "no-store" in sw_response.headers["cache-control"]
-    sw = sw_response.body.decode("utf-8")
+    sw = api._render_service_worker("")
     assert "service worker" in sw.lower()
     assert "__TOKDASH_CACHE_NAME__" not in sw
+    assert "__TOKDASH_BASE_PATH__" not in sw
     assert 'const CACHE_NAME = "tokdash-' in sw
 
-    html_response = asyncio.run(api.serve_dashboard())
-    assert "no-store" in html_response.headers["cache-control"]
-    html = (api.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = api._render_dashboard_html("")
     assert "Tokdash" in html
     assert "Sessions" in html
+    assert "__TOKDASH_BASE_PATH__" not in html
 
     icon_path = api.STATIC_DIR / "icons" / "icon-192.png"
     assert icon_path.exists()
     assert "no-store" in _static_middleware_cache_control("/static/icons/icon-192.png")
+
+
+def test_public_base_path_rendering():
+    assert api._normalize_public_base_path("tokdash/") == "/tokdash"
+    assert api._normalize_public_base_path("/") == ""
+
+    html = api._render_dashboard_html("/tokdash")
+    assert 'const configured = "/tokdash";' in html
+    assert 'configured.startsWith("/")' in html
+
+    manifest = api._render_manifest("/tokdash")
+    assert '"start_url":"/tokdash/"' in manifest
+    assert '"/tokdash/static/icons/icon-192.png"' in manifest
+
+    sw = api._render_service_worker("/tokdash")
+    assert 'const BASE_PATH = "/tokdash";' in sw
+    assert "__TOKDASH_BASE_PATH__" not in sw
 
 
 def test_api_custom_date_ranges_and_validation(synthetic_api_data):

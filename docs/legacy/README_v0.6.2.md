@@ -1,3 +1,12 @@
+<!--
+Archived README — Tokdash v0.6.2.
+Preserved verbatim before the v1.0.0 documentation rewrite (Python-native onboarding).
+For current usage see the top-level README.md; for the rewrite plan see
+docs/local/20260620_python_onboard/PYTHON_ONBOARD_PLAN.md.
+-->
+
+> **Archived snapshot — Tokdash v0.6.2.** Kept for reference before the v1.0.0 README rewrite.
+
 <p align="center">
   <a href="README.md">English</a> &nbsp;|&nbsp; <a href="README_CN.md">中文</a>
 </p>
@@ -35,7 +44,7 @@
 </p>
 
 <p align="center">
-  <b>Performance: about 30× faster than pre-0.6.0 cold usage scans, and 15× faster than ccusage in the same local benchmark.</b>
+  <b>v0.6.0: about 30× faster than pre-0.6.0 cold usage scans, and 15× faster than ccusage in the same local benchmark.</b>
 </p>
 
 > [!IMPORTANT]
@@ -43,8 +52,8 @@
 
 ## Table of Contents
 
-- [Features](#features)
 - [Live demo](#live-demo)
+- [Features](#features)
 - [Supported clients](docs/SUPPORTED_CLIENTS.md)
 - [Platform support](#platform-support)
 - [Quick start](#quick-start)
@@ -61,10 +70,10 @@
 ## Features
 
 - **Exact token counts**: Input/Output/Cache token breakdowns
-- **Statusline integration** *[new]*: drop a live token-usage indicator into Claude Code's statusline (or any agent that can hit a local HTTP endpoint) — see [Statusline integration](#statusline-integration)
+- **Statusline integration** *[new]*: drop a live token-usage indicator into Claude Code's statusline (or any agent that can hit a local HTTP endpoint) — see [Quick start](#statusline-integration)
 - **Custom date ranges**: Flatpickr date picker + quick range buttons (Today, Last 7 Days, This Month, etc.)
 - **Contribution calendar**: 2D heatmap + 3D isometric view with Tokens/Cost/Messages metrics
-- **Session explorer**: per-session drill-down for Codex, Claude Code, OpenCode, and Pi
+- **Session explorer**: per-session drill-down for Codex, Claude Code, and OpenCode
 - **10 style themes**: Elevated, Classic, Vibrant, Midnight, Paper, Liquid, Terminal, Brutalist, Arcade, Studio
 - **Light & dark mode**: auto-detects system preference, manual toggle
 - **PWA support**: installable as a progressive web app
@@ -111,117 +120,74 @@ Nothing is uploaded; nothing is read from your machine.
 - Python **3.10+**
 - One or more [supported clients](docs/SUPPORTED_CLIENTS.md) installed
 
-### Install
-
-Recommended isolated install:
+### Install (pip)
 
 ```bash
-pipx install tokdash
-```
-
-If you do not use pipx:
-
-```bash
-python3 -m pip install --user tokdash
-```
-
-### First run
-
-Run the onboarding wizard:
-
-```bash
-tokdash setup
-```
-
-The wizard configures a reversible user-level background service when the platform supports
-one, then prints the dashboard URL (default: `http://127.0.0.1:55423`). If no supported
-service manager is available, it records setup state and prints foreground run guidance. It
-uses localhost-first defaults, does not require `sudo` for the local service, and keeps your
-usage history unless you later uninstall with `--purge`.
-
-For a non-interactive setup from an agent, script, or bundle:
-
-```bash
-tokdash setup --auto --json
-```
-
-To preview what setup would change:
-
-```bash
-tokdash setup --dry-run
-```
-
-### Verify
-
-```bash
-tokdash doctor
-```
-
-`doctor` checks the runtime, background service, configured port, data paths, and update-check
-status. Use `tokdash doctor --json` for automation.
-
-### Existing installs
-
-If you installed Tokdash before the onboarding flow, upgrade first:
-
-```bash
-pipx upgrade tokdash
-# or: python3 -m pip install --user -U tokdash
-```
-
-Then run `tokdash doctor` and `tokdash setup` when you want Tokdash to manage the background
-service. If you already have a hand-written systemd or launchd service, setup does **not**
-silently replace it: it refuses unmarked `tokdash.service` / plist files by default. Keep
-managing that service yourself, remove it before setup, or run `tokdash setup --force` after
-checking `tokdash setup --dry-run`. `--force` also handles pre-1.0 services that already
-occupy port `55423` but do not expose the new `/health` fingerprint: it rewrites and restarts
-the existing `tokdash.service`. Use `tokdash setup --no-service` to skip service creation.
-
-### Update or remove
-
-```bash
-tokdash update       # upgrade the managed runtime and restart the service when possible
-tokdash uninstall    # reverse exactly what setup created; keeps usage history by default
-```
-
-`update` only drives install methods Tokdash can safely manage. If your runtime was installed
-by a package manager Tokdash does not own, it prints the exact manual guidance instead of
-mutating that environment.
-
-### Remote access
-
-Tokdash stays loopback-bound by default. For remote access, prefer:
-
-- interactive `tokdash setup`, which can offer an explicit Tailscale Serve step when available,
-- SSH forwarding: `ssh -L 55423:127.0.0.1:55423 <user>@<host>`.
-
-Some Tailscale installs require operator permission before a non-root user can configure Serve.
-If Tailscale denies the Serve config, the interactive wizard can offer the one-time
-`sudo tailscale set --operator=$USER` step and then retry `tailscale serve`. Tokdash uses
-the `/tokdash` path on your tailnet host, so it does not claim the domain root if you already
-serve other tools there. After Serve succeeds, setup prints the exact
-`https://...ts.net/tokdash` URL to open from your tailnet.
-
-Tailscale Serve is read-only for mutating dashboard/API actions because proxied requests fail
-Tokdash's loopback write gate. Use SSH forwarding when you need trusted remote writes.
-
-Binding Tokdash directly to `0.0.0.0` is possible but not recommended because the local API is
-not an internet-facing authenticated service.
-
-### Foreground fallback
-
-If you only want a one-off foreground process:
-
-```bash
+pip install tokdash
 tokdash serve
 ```
 
-Open `http://127.0.0.1:55423`. Use `tokdash serve --port <port>` if the default port is busy.
+Open: `http://localhost:55423`
 
-For full onboarding details, including runtime choices, WSL/systemd behavior, macOS launchd,
-Tailscale, bundling, update checks, and safe uninstall semantics, see
-**[`docs/ONBOARDING.md`](docs/ONBOARDING.md)**.
+If port conflicts:
+- `tokdash serve --port <port>`
 
+If you want to access Tokdash from another device (recommended):
+- Tailscale Serve (private to your tailnet): `tailscale serve 55423`
+- SSH port-forward: `ssh -L 55423:127.0.0.1:55423 <user>@<host>`
+
+Binding to `0.0.0.0` is possible, but **not recommended**: it listens on all interfaces and can expose the dashboard beyond your LAN (VPN/Wi-Fi/etc.). Only do this if you understand the risk and have firewall/auth in place.
+
+### Run in background
+
+See `docs/agents/systemd/BACKGROUND_RUN.md` for:
+- Linux systemd (user service) template
+- macOS launchd (LaunchAgent) template
+- Optional `/health` watchdog that auto-restarts a wedged service
+
+#### For Humans
+
+Copy and paste this prompt to your LLM agent (Claude Code, AmpCode, Cursor, etc.):
+
+```text
+Install and configure Tokdash to run in the background by following the instructions here:
+https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/agents/systemd/AGENTS.md
+
+Or read the Background Run guide, but seriously, let an agent do it.
+```
+
+#### For LLM Agents
+
+Fetch the installation guide and follow it:
+
+```bash
+curl -s https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/agents/systemd/AGENTS.md
+```
+
+### Updating Tokdash
+
+If you installed Tokdash with pip and are running it via systemd:
+
+```bash
+# 1. Upgrade the package
+pip install --upgrade tokdash
+
+# 2. Restart the systemd service to pick up changes
+systemctl --user daemon-reload
+systemctl --user restart tokdash
+
+# 3. Verify the new version
+pip show tokdash | grep Version
+systemctl --user status tokdash --no-pager
+
+# 4. Test the API is responding
+curl 'http://127.0.0.1:55423/api/usage?period=today'
+```
+
+View logs if needed:
+```bash
+journalctl --user -u tokdash -f
+```
 
 ### OpenClaw digest (scheduled reports)
 
@@ -264,7 +230,7 @@ Tokdash is **localhost-only by default**.
 
 - `TOKDASH_HOST` (default: `127.0.0.1`)
 - `TOKDASH_PORT` (default: `55423`)
-- `TOKDASH_CACHE_TTL` (default: `600` seconds)
+- `TOKDASH_CACHE_TTL` (default: `120` seconds)
 - `TOKDASH_COMPUTE_CONCURRENCY` (default: `2`) — cap on simultaneous heavy history reparses; excess cold requests return a fast `503` instead of saturating the server under load
 - `TOKDASH_LIMIT_CONCURRENCY` (default: `64`) — uvicorn connection cap (backpressure)
 - `TOKDASH_KEEPALIVE` (default: `5` seconds) — uvicorn keep-alive timeout
@@ -294,25 +260,12 @@ tokdash db resync --pretty
 tokdash db watch --pretty
 ```
 
-Remote access through Tailscale Serve:
+Example (remote access via Tailscale Serve; recommended):
 
 ```bash
-tokdash setup
-# When the wizard offers Tailscale Serve, confirm it.
-# Setup prints the exact https://...ts.net/tokdash URL after Serve succeeds.
+tokdash serve --bind 127.0.0.1 --port 55423
+tailscale serve --bg 55423
 ```
-
-If you manage Tailscale yourself after setup has started Tokdash on the default port:
-
-```bash
-tailscale serve --bg --https=443 --set-path=/tokdash http://127.0.0.1:55423
-```
-
-Open `https://<machine>.<tailnet>.ts.net/tokdash`. Stop that manual Serve rule with
-`tailscale serve --https=443 --set-path=/tokdash off`. `tokdash uninstall` only reverts
-Tailscale Serve rules that the setup wizard created and recorded. Tailscale Serve remains
-read-only for mutating dashboard/API actions; use SSH forwarding when you need trusted remote
-writes.
 
 By default `tokdash serve` opens the dashboard in your browser once on startup. Pass `--no-open` to disable this (it is also skipped automatically in headless/SSH environments and in the background service templates).
 
@@ -320,7 +273,7 @@ By default `tokdash serve` opens the dashboard in your browser once on startup. 
 
 - **No telemetry**: Tokdash does not intentionally send your data anywhere.
 - **Local parsing**: usage is computed from local session files (see [supported clients](docs/SUPPORTED_CLIENTS.md)).
-- **Server exposure**: Tokdash binds to `127.0.0.1` by default. Prefer Tailscale Serve or SSH tunneling for remote access; avoid `--bind 0.0.0.0` unless you understand it listens on all interfaces and have firewall/auth in place. Tailscale Serve is read-only for write endpoints by design because proxied requests fail Tokdash's loopback write gate; use SSH forwarding when you need authenticated remote writes.
+- **Server exposure**: Tokdash binds to `127.0.0.1` by default. Prefer Tailscale Serve or SSH tunneling for remote access; avoid `--bind 0.0.0.0` unless you understand it listens on all interfaces and have firewall/auth in place.
 
 ## API (local)
 
@@ -342,7 +295,7 @@ Full API reference: [`docs/API.md`](docs/API.md) — schema, parameters, and res
 
 ## Cost Accuracy Note
 
-Token counts depend on what each client logs locally. Costs are computed from the bundled pricing database (`src/tokdash/pricing_db.json`) by default, or from your saved dashboard pricing override at `<data_dir>/pricing_db.json` when present (the Pricing tab writes there and it fully replaces the bundled rates). Either way they may lag real provider pricing — use as an estimate and verify against your billing source if it matters.
+Token counts depend on what each client logs locally. Costs are computed from `src/tokdash/pricing_db.json` and may lag real provider pricing — use as an estimate and verify against your billing source if it matters.
 
 ## History retention
 
@@ -392,7 +345,7 @@ tokdash/
 │           ├── index.html        # Single-page dashboard
 │           ├── theme-config.js   # Theme palettes & heatmap colors
 │           └── themes.css        # Per-theme CSS overrides
-└── docs/                   # Onboarding guide, API docs, release notes, and agent prompts
+└── docs/                   # Roadmap + background-run docs + agent prompts
 ```
 
 ## License

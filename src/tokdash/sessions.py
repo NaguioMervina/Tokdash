@@ -25,10 +25,26 @@ TOOL_LABELS = {
 _PRICING_DB = PricingDatabase()
 DISPLAY_NAME_MAX_CHARS = 96
 
+# Signature of the pricing files the singleton was last loaded from. Sessions cost is computed
+# via the long-lived _PRICING_DB singleton, whose in-memory rates are refreshed only by
+# reload_pricing_db() (the dashboard PUT). If the data-dir override changes by ANY other path
+# (a manual edit while serving, or a sibling/--workers process that handled the PUT), the
+# read path must reload the singleton so costs match the cache key — _pricing_signature() does
+# that when this drifts. Initialized to the signature loaded at import.
+try:
+    _pricing_last_loaded_sig: tuple = _PRICING_DB.signature()
+except (OSError, AttributeError):
+    _pricing_last_loaded_sig = ()
+
 
 def reload_pricing_db() -> None:
     """Reload session pricing and clear parsed session caches."""
+    global _pricing_last_loaded_sig
     _PRICING_DB.load()
+    try:
+        _pricing_last_loaded_sig = _PRICING_DB.signature()
+    except (OSError, AttributeError):
+        _pricing_last_loaded_sig = ()
     _parse_codex_session_file.cache_clear()
     _load_codex_sessions.cache_clear()
     _load_codex_title_map.cache_clear()
@@ -330,11 +346,23 @@ def _iter_file_signatures(root: Path) -> tuple[tuple[str, int, int], ...]:
 
 
 def _pricing_signature() -> tuple:
+    # Cover baseline AND the data-dir override so session caches bust when either changes
+    # (a dashboard pricing edit writes only the override). Also reload the singleton's
+    # in-memory rates here when the signature drifts, so a cache MISS re-parses with the
+    # CURRENT pricing even when the change didn't come through reload_pricing_db() (manual
+    # edit / sibling process) — otherwise the new cache entry would be filled with stale costs.
+    global _pricing_last_loaded_sig
     try:
-        stat = _PRICING_DB.db_path.stat()
-        return (stat.st_mtime_ns, stat.st_size)
-    except (FileNotFoundError, OSError, AttributeError):
+        sig = _PRICING_DB.signature()
+    except (OSError, AttributeError):
         return ()
+    if sig != _pricing_last_loaded_sig:
+        try:
+            _PRICING_DB.load()
+            _pricing_last_loaded_sig = sig
+        except Exception:
+            pass
+    return sig
 
 
 def _codex_state_db_path() -> Path:

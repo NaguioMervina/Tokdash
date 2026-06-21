@@ -7,7 +7,9 @@ Tokdash exposes a local HTTP API (FastAPI) for querying token usage, costs, and 
 - **OpenAPI schema:** `GET /openapi.json`
 - **Interactive docs:** `GET /docs` (Swagger UI), `GET /redoc`
 
-All endpoints return JSON. No authentication — tokdash is intended to bind to loopback only.
+All endpoints return JSON. The API is unauthenticated and intended to bind to loopback
+only. **State-changing requests are gated** (loopback bind + Host/Origin allowlist +
+per-session token); see [`docs/SECURITY.md`](SECURITY.md) and `PUT /api/pricing-db` below.
 
 ---
 
@@ -15,7 +17,11 @@ All endpoints return JSON. No authentication — tokdash is intended to bind to 
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness probe |
+| `GET` | `/health` | Liveness probe (with a Tokdash fingerprint) |
+| `GET` | `/api/version` | Runtime version + setup install method |
+| `GET` | `/api/csrf-token` | Per-session write token (loopback/same-origin only) |
+| `POST` | `/api/update-check` | Opt-in cached PyPI version check (write-gated) |
+| `POST` | `/api/update-check/consent` | Persist one-time update-check consent (write-gated) |
 | `GET` | `/api/usage` | Aggregated token usage and cost across all tools |
 | `GET` | `/api/tools` | Per-tool usage breakdown (coding apps only) |
 | `GET` | `/api/sessions` | List sessions for a given tool |
@@ -25,7 +31,7 @@ All endpoints return JSON. No authentication — tokdash is intended to bind to 
 | `GET` | `/api/openclaw` | OpenClaw model breakdown |
 | `GET` | `/api/stats` | Annual stats aggregation |
 | `GET` | `/api/pricing-db` | Current pricing database snapshot |
-| `PUT` | `/api/pricing-db` | Update the pricing database |
+| `PUT` | `/api/pricing-db` | Update the pricing database (write-gated, requires token) |
 | `GET` | `/` | Web dashboard (HTML) |
 
 ---
@@ -49,11 +55,74 @@ For arbitrary ranges, use `date_from` and `date_to` (format `YYYY-MM-DD`) where 
 
 ## `GET /health`
 
-Liveness check.
+Liveness check. Carries a distinctive `service`/`version` fingerprint so a port probe can
+tell "this is Tokdash" rather than trusting a generic `{"status":"ok"}` any app could return.
 
 **Response**
 ```json
-{ "status": "ok" }
+{ "status": "ok", "service": "tokdash", "version": "0.6.2" }
+```
+
+---
+
+## `GET /api/version`
+
+Local version/provenance. `install_method` is read from the setup manifest
+(`<data_dir>/install.json`) when present, else `null`.
+
+**Response**
+```json
+{
+  "service": "tokdash",
+  "runtime_version": "0.6.2",
+  "install_method": "pipx",
+  "update_check_enabled": false
+}
+```
+
+---
+
+## `GET /api/csrf-token`
+
+Issues the per-session write token the dashboard echoes back as `X-Tokdash-Token` on
+mutating requests. Returns `403` unless the server is loopback-bound and the request's
+`Host`/`Origin` are in the loopback allowlist (so a page on another localhost port cannot
+read it).
+
+**Response**
+```json
+{ "token": "<per-session-token>" }
+```
+
+---
+
+## `POST /api/update-check`
+
+Opt-in, default-off PyPI version check (see `docs/ONBOARDING.md` → Update checks). **Write-gated**
+(loopback bind + `Host`/`Origin` allowlist + `X-Tokdash-Token`). No-op unless update checks are
+enabled (`TOKDASH_UPDATE_CHECK=1` or saved consent). Result is cached for hours; never an
+automatic/background call, and it only *reports* — it never runs an upgrade.
+
+**Response (enabled)**
+```json
+{ "enabled": true, "current": "0.6.2", "latest": "0.7.0", "update_available": true, "error": null, "cached": false }
+```
+**Response (disabled)**
+```json
+{ "enabled": false, "update_available": false }
+```
+
+---
+
+## `POST /api/update-check/consent`
+
+Persists one-time consent (`update_check: true`) to `<data_dir>/config.json` so update checks are
+enabled. **Write-gated** like all mutations. `TOKDASH_UPDATE_CHECK=0` remains a hard kill switch that
+overrides saved consent.
+
+**Response**
+```json
+{ "enabled": true }
 ```
 
 ---
@@ -149,10 +218,11 @@ List of sessions for a specific tool.
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `tool` | string | **yes** | – | Tool name (e.g. `claude`, `codex`, `openclaw`) |
+| `tool` | string | **yes** | – | Tool name: `codex`, `claude`, `opencode`, or `pi_agent` (the session explorer set; OpenClaw is served only via `/api/openclaw`) |
 | `period` | string | no | `"today"` | See [Period parameter](#period-parameter) |
 | `date_from` | string | no | – | Start date (`YYYY-MM-DD`) |
 | `date_to` | string | no | – | End date (`YYYY-MM-DD`) |
+| `include_review_sessions` | boolean | no | `false` | Include Codex review / auto-permission sessions (hidden by default) |
 
 **Response fields**
 
@@ -232,6 +302,7 @@ Convenience wrapper for Codex sessions. Equivalent to `/api/sessions?tool=codex`
 | Name | Type | Required | Default |
 |---|---|---|---|
 | `period` | string | no | `"today"` |
+| `include_review_sessions` | boolean | no | `false` (Codex review / auto-permission sessions hidden by default) |
 
 ---
 
@@ -282,14 +353,26 @@ Yearly stats aggregation.
 
 ## `GET /api/pricing-db`
 
-Returns the current pricing database snapshot.
+Returns the **effective** pricing database: the user override under `TOKDASH_DATA_DIR` when
+present (it fully replaces the baseline — WYSIWYG editor semantics), otherwise the packaged
+baseline. A corrupt override falls back to the baseline (never wipes pricing).
 
 **Response fields**
 
 | Field | Type | Description |
 |---|---|---|
-| `path` | string | Filesystem path of the pricing JSON |
-| `data` | object | The pricing database (versions, aliases, model rates) |
+| `path` | string | Where edits PERSIST — the override file under the data dir (`<data_dir>/pricing_db.json`) |
+| `baseline_path` | string | The read-only packaged baseline (`…/site-packages/tokdash/pricing_db.json`) |
+| `baseline_version` | string \| null | The shipped baseline's `version`, reported even when an override is active so a UI can warn when an override has drifted behind newer bundled pricing |
+| `source` | string | `"override"` if the data dir override is in effect, else `"baseline"` |
+| `data` | object | The effective pricing database (versions, aliases, model rates) |
+| `text` | string | Pretty-printed canonical JSON of `data` (trailing newline) — what the editor renders |
+
+> **Trade-off (by design).** Because a saved override **fully replaces** the baseline, it also
+> **freezes future bundled pricing updates** for the models it covers until you delete it. This is
+> intentional — it keeps the editor WYSIWYG (a deletion stays deleted). Compare `baseline_version`
+> against your override's `version` to decide when to re-fork; delete `<data_dir>/pricing_db.json`
+> to return to the shipped baseline and resume receiving updates.
 
 The `data` object contains:
 - `version` — pricing DB version
@@ -300,7 +383,27 @@ The `data` object contains:
 
 ## `PUT /api/pricing-db`
 
-Replaces the pricing database. Body must match the GET response `data` shape.
+Saves pricing edits. Body must match the GET response `data` shape (or `{"text": "<json>"}`).
+Edits are written to the **override** file under `TOKDASH_DATA_DIR` (never the packaged
+baseline), so they survive `tokdash update` (a pip/pipx reinstall) and succeed on a read-only
+install. The override fully replaces the baseline once saved (so deletions stick); delete the
+override file to revert to the shipped defaults. Returns the same `{path, baseline_path,
+baseline_version, source, data, text}` shape as GET (with `source: "override"`).
+
+**Write protection.** As a state-changing endpoint it is gated (returns `403` otherwise):
+
+- the server must be bound to loopback;
+- `Host` (and any `Origin`/`Referer`) must be a loopback address in the allowlist;
+- the request must carry a valid `X-Tokdash-Token` (fetch it from `GET /api/csrf-token`).
+
+The dashboard does this automatically. A scripted client must fetch the token first:
+
+```bash
+TOKEN=$(curl -s http://127.0.0.1:55423/api/csrf-token | jq -r .token)
+curl -s -X PUT http://127.0.0.1:55423/api/pricing-db \
+  -H "Content-Type: application/json" -H "X-Tokdash-Token: $TOKEN" \
+  -d '{"data": { ... }}'
+```
 
 ---
 

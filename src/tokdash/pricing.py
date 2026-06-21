@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -12,43 +13,100 @@ class PricingDatabase:
     Backed by `pricing_db.json` shipped with the package.
     """
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, override_path: Optional[Path] = None):
         self.db_path = db_path or (Path(__file__).parent / "pricing_db.json")
-        self.pricing: Dict[str, Dict[str, Any]] = {}
-        self.aliases: Dict[str, str] = {}
-        self._resolved_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        # User overrides live under the data dir (not site-packages) so dashboard pricing
+        # edits survive `tokdash update` and don't 500 on a read-only install. Resolved
+        # lazily per-load (default None) so TOKDASH_DATA_DIR changes are honored.
+        self._override_path_explicit = override_path
+        # pricing + aliases + a memo cache are published together as ONE immutable snapshot
+        # reference (self._state). load() rebuilds the triple and swaps it in a single atomic
+        # assignment, and readers (_resolve_pricing) grab the reference once — so a reload on a
+        # request worker thread (sessions._pricing_signature reloads on signature drift) can
+        # never expose a half-updated pricing/aliases pair, nor leak a stale entry into a
+        # freshly-cleared cache. A single attribute rebind/read is atomic under the GIL, so no lock.
+        self._state: tuple = ({}, {}, {})
         self.load()
 
+    @property
+    def pricing(self) -> Dict[str, Dict[str, Any]]:
+        return self._state[0]
+
+    @property
+    def aliases(self) -> Dict[str, str]:
+        return self._state[1]
+
+    def override_path(self) -> Path:
+        if self._override_path_explicit is not None:
+            return self._override_path_explicit
+        from .onboard import paths
+
+        return paths.pricing_db_override_path()
+
     def load(self) -> None:
-        if not self.db_path.exists():
-            return
+        # The user override (under the data dir) is AUTHORITATIVE when present and valid —
+        # full replacement, not a merge. This preserves the dashboard editor's WYSIWYG
+        # contract (a deleted model stays deleted; what you save is the effective DB) and
+        # still fixes the packaged-file-write defects (edits live under TOKDASH_DATA_DIR).
+        # A missing/corrupt override falls back to the packaged baseline (never wiped).
+        loaded = self._load_file(self.override_path())
+        if loaded is None:
+            loaded = self._load_file(self.db_path)
+        pricing, aliases = loaded if loaded is not None else ({}, {})
+        self._state = (pricing, aliases, {})  # atomic publish (see __init__)
+
+    def signature(self) -> tuple:
+        """Stat baseline + override so caches keyed on this bust when EITHER changes.
+
+        The baseline is packaged/read-only (it changes only on reinstall = a new process), so a
+        stat is enough. The override is the one file that can change OUT OF BAND while serving (a
+        manual edit, or a sibling/--workers process that handled a PUT), so fold in a content
+        hash too — that way an edit preserving the byte size within a single mtime tick still
+        busts the cache. The override is small and usually absent, so this stays cheap.
+        """
+        sig: list = []
         try:
-            with open(self.db_path, "r", encoding="utf-8") as f:
+            st = self.db_path.stat()
+            sig.append((str(self.db_path), st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((str(self.db_path), 0, 0))
+        ov = self.override_path()
+        try:
+            raw = ov.read_bytes()
+            sig.append((str(ov), len(raw), hashlib.blake2b(raw, digest_size=16).hexdigest()))
+        except OSError:
+            sig.append((str(ov), 0, ""))
+        return tuple(sig)
+
+    def _load_file(self, path: Path):
+        """Parse one pricing file. Returns (models, aliases), or None if absent/invalid.
+
+        ``None`` (not empty dicts) signals "no usable file here" so the caller can fall back
+        to the baseline rather than wiping pricing on a missing/corrupt override.
+        """
+        try:
+            if not path.exists():
+                return None
+            with open(path, "r", encoding="utf-8") as f:
                 raw = json.load(f) or {}
-                models = (raw.get("models") or {}) if isinstance(raw, dict) else {}
-                # Filter out non-dict sentinel/comment entries.
-                self.pricing = {k: v for k, v in models.items() if isinstance(v, dict)}
-
-                aliases_raw = (raw.get("aliases") or {}) if isinstance(raw, dict) else {}
-                aliases: Dict[str, str] = {}
-                if isinstance(aliases_raw, dict):
-                    for k, v in aliases_raw.items():
-                        if not isinstance(k, str) or not isinstance(v, str):
-                            continue
-                        nk = self._normalize_alias_key(k)
-                        nv = self._normalize_key(v)
-                        if not nk or not nv:
-                            continue
-                        aliases[nk] = nv
-                        # Also allow lookups by base model (drop provider prefix) for convenience.
-                        aliases.setdefault(nk.split("/")[-1], nv)
-                self.aliases = aliases
-
-                self._resolved_cache = {}
         except Exception:
-            self.pricing = {}
-            self.aliases = {}
-            self._resolved_cache = {}
+            return None
+        if not isinstance(raw, dict) or not isinstance(raw.get("models"), dict):
+            return None
+        models = {k: v for k, v in raw["models"].items() if isinstance(v, dict)}
+        aliases: Dict[str, str] = {}
+        aliases_raw = raw.get("aliases") or {}
+        if isinstance(aliases_raw, dict):
+            for k, v in aliases_raw.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    continue
+                nk = self._normalize_alias_key(k)
+                nv = self._normalize_key(v)
+                if not nk or not nv:
+                    continue
+                aliases[nk] = nv
+                aliases.setdefault(nk.split("/")[-1], nv)
+        return models, aliases
 
     @staticmethod
     def _normalize_key(s: str) -> str:
@@ -100,8 +158,11 @@ class PricingDatabase:
         return []
 
     def _resolve_pricing(self, model: str) -> Optional[Dict[str, Any]]:
-        cached = self._resolved_cache.get(model)
-        if cached is not None or model in self._resolved_cache:
+        # Grab the published snapshot ONCE so pricing/aliases/cache are a consistent triple
+        # even if load() swaps in a new state mid-resolution on another thread.
+        pricing, aliases, cache = self._state
+        cached = cache.get(model)
+        if cached is not None or model in cache:
             return cached
 
         raw = model or ""
@@ -116,13 +177,13 @@ class PricingDatabase:
             if k in seen:
                 return None
             seen.add(k)
-            return self.pricing.get(k)
+            return pricing.get(k)
 
         # Try direct keys first (for exact DB matches).
         for k in (raw, base):
             p = consider(k)
             if p:
-                self._resolved_cache[model] = p
+                cache[model] = p
                 return p
 
         # Alias map (generated externally) to unify provider heads / naming variants.
@@ -147,12 +208,12 @@ class PricingDatabase:
         for ak in alias_variants:
             if not ak:
                 continue
-            target = self.aliases.get(ak)
+            target = aliases.get(ak)
             if not target:
                 continue
             p = consider(target)
             if p:
-                self._resolved_cache[model] = p
+                cache[model] = p
                 return p
 
         # Normalized + suffix-stripped candidates.
@@ -182,10 +243,10 @@ class PricingDatabase:
         for k in expanded:
             p = consider(k)
             if p:
-                self._resolved_cache[model] = p
+                cache[model] = p
                 return p
 
-        self._resolved_cache[model] = None
+        cache[model] = None
         return None
 
     def get_cost(

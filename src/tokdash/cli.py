@@ -12,6 +12,7 @@ from pathlib import Path
 
 import uvicorn
 
+from . import __version__
 from .api import app
 from .compute import compute_usage
 
@@ -57,10 +58,16 @@ def _positive_int_env(name: str, default: int) -> int:
 def build_parser(prog: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog, description="Tokdash")
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"tokdash {__version__}",
+        help="Print the Tokdash version and exit",
+    )
+    parser.add_argument(
         "command",
         nargs="?",
         default="serve",
-        choices=["serve", "export", "db"],
+        choices=["serve", "export", "db", "version", "setup", "doctor", "update", "uninstall"],
         help="Command (default: serve)",
     )
     parser.add_argument(
@@ -125,7 +132,59 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="For `tokdash db repair`, report checks without changing counters",
+        help="For `tokdash db repair`, report checks without changing counters. "
+        "For setup/update/uninstall, print the plan/command and change nothing.",
+    )
+
+    # Lifecycle options (setup / doctor / update / uninstall). These reuse the global
+    # --bind/--port/--json/--dry-run above; their defaults are inert for the
+    # serve/export/db verbs so the parser-compatibility contract (§7.1) holds.
+    lifecycle = parser.add_argument_group("lifecycle (setup / doctor / update / uninstall)")
+    lifecycle.add_argument(
+        "--auto",
+        action="store_true",
+        help="Non-interactive 'easy' route with safe local-only defaults",
+    )
+    lifecycle.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Assume yes to confirmations (apply without prompting)",
+    )
+    lifecycle.add_argument(
+        "--runtime",
+        choices=["auto", "existing", "pipx", "venv", "binary"],
+        default="auto",
+        help="Service runtime to use (default: auto = the current interpreter)",
+    )
+    lifecycle.add_argument(
+        "--service",
+        choices=["auto", "systemd", "launchd", "none"],
+        default="auto",
+        help="Background service type (default: auto)",
+    )
+    lifecycle.add_argument(
+        "--no-service",
+        action="store_true",
+        help="Do not create a background service",
+    )
+    lifecycle.add_argument(
+        "--purge",
+        action="store_true",
+        help="uninstall: also delete usage history and config (off by default)",
+    )
+    lifecycle.add_argument(
+        "--keep-runtime",
+        action="store_true",
+        help="uninstall: remove the service but keep a setup-owned runtime",
+    )
+    lifecycle.add_argument(
+        "--force",
+        "--adopt",
+        dest="force",
+        action="store_true",
+        help="setup: replace a pre-existing unmarked tokdash.service; "
+        "uninstall: remove a unit that is unmarked or no longer carries setup's marker",
     )
 
     return parser
@@ -170,6 +229,10 @@ def _open_browser(url: str) -> None:
 def serve(host: str, port: int, log_level: str, open_browser: bool = True) -> None:
     url_host = "localhost" if host in {"0.0.0.0", "::"} else host
     url = f"http://{url_host}:{port}"
+    # Tell the app its effective bind/port so the write-protection gate
+    # (api._write_guard) can enforce loopback-only mutations and a Host allowlist.
+    app.state.bind = host
+    app.state.port = port
     print(f"🚀 Starting Tokdash on {url}")
     if os.environ.get("TOKDASH_NO_RETENTION_NOTICE", "").strip().lower() not in {"1", "true", "yes"}:
         print(
@@ -404,6 +467,11 @@ def _watch_usage_database(pretty: bool, output: str | None) -> int:
 def db_command(action: str, pretty: bool, output: str | None, verify_period: str, dry_run: bool = False) -> int:
     from .usage_store import UsageEntryStore
 
+    # `--dry-run` only previews `db repair`. For the mutating/looping actions it would
+    # otherwise be silently ignored while the DB is rebuilt/replaced — fail loudly instead.
+    if dry_run and action in {"sync", "resync", "watch"}:
+        raise SystemExit(f"--dry-run is not supported for `tokdash db {action}` (only `tokdash db repair`).")
+
     if action == "status":
         _emit_json(UsageEntryStore().status(), pretty, output)
         return 0
@@ -429,6 +497,23 @@ def db_command(action: str, pretty: bool, output: str | None, verify_period: str
 def cli(argv: list[str] | None = None, prog: str = "tokdash") -> int:
     parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
+
+    if args.command == "version":
+        print(f"tokdash {__version__}")
+        return 0
+
+    if args.command in {"setup", "doctor", "update", "uninstall"}:
+        # Only `setup` binds a port, so only it resolves (and validates) TOKDASH_PORT here —
+        # symmetric with how --bind defaults to TOKDASH_HOST and serve resolves the port.
+        # doctor prefers the manifest-recorded port; update/uninstall don't use the port at
+        # all (update reads the manifest; uninstall falls back to DEFAULT_PORT internally), so
+        # a malformed TOKDASH_PORT must NOT make those two die with "Invalid TOKDASH_PORT".
+        if args.port is None and args.command == "setup":
+            args.port = _default_port()
+        # Imported lazily so serve/export/db don't pay for the onboarding engine.
+        from .onboard.engine import run_lifecycle
+
+        return run_lifecycle(args)
 
     if args.command == "serve":
         port = args.port if args.port is not None else _default_port()
