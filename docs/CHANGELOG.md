@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 1.0.4 - 2026-06-22
+
+### Added
+- Added ready-made Claude Code statusline templates under `docs/examples/statusline/`: a minimal one-line script and a fuller multi-row dashboard script that read local Tokdash usage totals without calling mutating endpoints.
+
+### Fixed
+- Hardened interactive Tailscale Serve setup so the targeted teardown command is recorded before exposure, failed Serve attempts reconcile the manifest back to the unset state, and post-success URL write failures warn without crashing setup.
+- Tailscale Serve status parsing now always reports the path-scoped `/tokdash` URL instead of accidentally advertising the tailnet host root.
+- Manifest writes and dashboard pricing override writes now clean up `.tmp` sidecars after failed atomic writes.
+- The write-protection loopback check now parses real IP literals, rejecting spoofed host strings such as `127.0.0.1.evil.com`.
+- The full statusline template now supports macOS/BSD `date` for rate-limit countdowns and clamps only the visual context bar when usage exceeds 100%.
+
 ## 1.0.3 - 2026-06-21
 
 ### Changed

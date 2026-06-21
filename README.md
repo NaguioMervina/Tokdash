@@ -267,11 +267,18 @@ curl -s https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/agents/o
 
 ### Statusline integration
 
-The local API can power a statusline item in your coding agent (Claude Code, etc.) showing live token/cost stats. Hand your agent this prompt:
+The local API can power a statusline item in your coding agent (Claude Code, etc.) showing live token/cost stats.
+
+**Ready-made templates** live in [`docs/examples/statusline/`](docs/examples/statusline/) — copy one into `~/.claude/scripts/` and add the `statusLine` block to `~/.claude/settings.json`:
+
+- [`statusline-minimal.sh`](docs/examples/statusline/statusline-minimal.sh) → one line: `[Claude Sonnet 4.6] 📁 myproject | 📊 12.3M ($4.56) today`
+- [`statusline-full.sh`](docs/examples/statusline/statusline-full.sh) → a four-row dashboard with today + week totals and a top-3 per-tool breakdown
+
+Both are read-only, localhost-only, and fail silently if Tokdash isn't running. See the [folder README](docs/examples/statusline/README.md) for install/config and [`docs/API.md`](docs/API.md) for the endpoint reference.
+
+Prefer to roll your own? Hand your agent this prompt and point it at [`docs/API.md`](docs/API.md):
 
 > *"I would like to add a statusline item from the tokdash endpoint's API; it should show the total tokens used today."*
-
-Point it at [`docs/API.md`](docs/API.md) for endpoint details and let it wire the rest.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-statusline.png" alt="Tokdash statusline integration example" width="900" />

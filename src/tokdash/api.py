@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -208,7 +209,16 @@ _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 def _is_loopback(addr: str) -> bool:
     addr = (addr or "").strip().lower()
-    return addr in {"127.0.0.1", "::1", "localhost"} or addr.startswith("127.")
+    if addr == "localhost":
+        return True
+    # Strip brackets from IPv6 literals like "[::1]" before parsing.
+    candidate = addr[1:-1] if addr.startswith("[") and addr.endswith("]") else addr
+    try:
+        # Parse as an IP so only the real 127.0.0.0/8 and ::1 loopback ranges match. A prefix
+        # check like addr.startswith("127.") would wrongly accept "127.0.0.1.evil.com".
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
 
 
 def _effective_bind() -> str:
@@ -667,6 +677,10 @@ def update_pricing_db(payload: Dict[str, Any]) -> Dict[str, Any]:
         tmp_path.write_text(formatted, encoding="utf-8")
         tmp_path.replace(override)
     except OSError as e:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
         raise HTTPException(status_code=500, detail=f"Failed to write {override}: {e}")
 
     reload_pricing_db()

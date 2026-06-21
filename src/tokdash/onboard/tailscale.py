@@ -73,6 +73,16 @@ def parse_serve_url(status_text: str, local_port: int, path: str = SERVE_PATH) -
     """Extract the MagicDNS HTTPS URL for the Serve target from `tailscale serve status`."""
     target = f"http://127.0.0.1:{local_port}"
     serve_path = _normalize_path(path)
+
+    def _scoped(url: str) -> str:
+        # We configured ``serve_path``, so the public URL is always host + serve_path. Append
+        # it unless the parsed URL already carries it — never advertise the bare tailnet host
+        # root (that would imply other services are reachable at the root).
+        base = url.rstrip("/")
+        if serve_path != "/" and not base.endswith(serve_path):
+            return base + serve_path
+        return base
+
     current_url: str | None = None
     first_url: str | None = None
     for raw in status_text.splitlines():
@@ -81,11 +91,13 @@ def parse_serve_url(status_text: str, local_port: int, path: str = SERVE_PATH) -
         if match:
             current_url = match.group(0).rstrip("/")
             first_url = first_url or current_url
+        # The target line is authoritative: attach our serve path to the host URL in scope
+        # (this line's own URL, else the most recent parent line's URL).
         if target in line and current_url:
-            if serve_path != "/" and serve_path in line and not current_url.endswith(serve_path):
-                return current_url + serve_path
-            return current_url
-    return first_url
+            return _scoped(current_url)
+    # No target line resolved (unusual status layout); still scope the first host URL to our
+    # serve path rather than returning the host root.
+    return _scoped(first_url) if first_url else None
 
 
 def serve_status() -> Dict[str, Any]:

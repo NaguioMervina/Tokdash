@@ -409,6 +409,8 @@ curl -s -X PUT http://127.0.0.1:55423/api/pricing-db \
 
 ## Integration Example: Claude Code Status Line
 
+> **Ready-made templates:** [`docs/examples/statusline/`](examples/statusline/) ships a minimal and a full statusline script plus install/config notes. The snippet below is the minimal one, reproduced here for reference.
+
 Tokdash's `/api/usage` endpoint is well suited for embedding daily totals into the Claude Code status line. The snippet below queries today's usage with a 1-second timeout, falls back silently if tokdash is unreachable, and renders a compact summary like `📊 69.9M ($55.64) today`.
 
 ### Status line script (`~/.claude/scripts/statusline.sh`)

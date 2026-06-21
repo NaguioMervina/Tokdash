@@ -182,6 +182,27 @@ def _open_dashboard_url(url: str) -> bool:
     return False
 
 
+_TAILSCALE_UNSET = {"configured_by_setup": False, "target": None, "teardown_command": None}
+
+
+def _set_manifest_tailscale(block: Optional[Dict[str, Any]]) -> bool:
+    """Merge ``block`` (or the unset shape when ``None``) into install.json's ``tailscale_serve``.
+
+    Returns ``False`` when the manifest is unreadable or the write fails, so the caller can
+    warn (or skip exposing) instead of crashing setup with a traceback after the user has
+    already opted into Tailscale Serve. Never raises.
+    """
+    man = manifest.read_manifest()
+    if man is None:
+        return False
+    man["tailscale_serve"] = block if block is not None else dict(_TAILSCALE_UNSET)
+    try:
+        manifest.write_manifest(man)
+    except OSError:
+        return False
+    return True
+
+
 def _offer_tailscale(result: Dict[str, Any]) -> None:
     """Expert-wizard opt-in: run `tailscale serve` and record it for uninstall (§8.3)."""
     port = result["port"]
@@ -191,6 +212,21 @@ def _offer_tailscale(result: Dict[str, Any]) -> None:
     if not _confirm("Run it now?", default=False):
         print("  Skipped — run the command above yourself to expose it later.")
         return
+
+    # Record the teardown BEFORE activating Serve. `tailscale serve` exposes Tokdash to the
+    # whole tailnet the instant it succeeds; if the process were killed between that success
+    # and recording the block, uninstall would have no teardown command and the unauthenticated
+    # exposure would be stranded. The teardown is the deterministic matched inverse of the serve
+    # command, so pre-recording it is safe — if serve never activates we clear it again below,
+    # and running the `off` teardown on a rule that was never created is a harmless no-op.
+    if not _set_manifest_tailscale(tailscale.manifest_block(port, url=None)):
+        _err(
+            "Could not record a Tailscale exposure for revert (install.json is unreadable or "
+            "not writable). Skipping Tailscale Serve; fix the manifest and re-run, or expose it "
+            f"yourself with: {' '.join(cmd)}"
+        )
+        return
+
     out = tailscale.run_serve(port)
     if not out["ok"] and tailscale.needs_operator_permission(out.get("error")):
         print(_warn("Tailscale denied Serve configuration for this user."))
@@ -202,6 +238,7 @@ def _offer_tailscale(result: Dict[str, Any]) -> None:
             if not grant["ok"]:
                 _err(f"tailscale operator grant failed: {grant['error']}")
                 _err(f"Run manually: {' '.join(grant['command'])}")
+                _set_manifest_tailscale(None)  # nothing was exposed; undo the pre-record
                 return
             out = tailscale.run_serve(port)
     if not out["ok"]:
@@ -209,19 +246,18 @@ def _offer_tailscale(result: Dict[str, Any]) -> None:
         if tailscale.needs_operator_permission(out.get("error")):
             _err(f"Run manually once: {' '.join(tailscale.operator_command())}")
             _err(f"Then retry: {' '.join(tailscale.serve_command(port))}")
+        _set_manifest_tailscale(None)  # serve never activated; keep uninstall exact
         return
-    man = manifest.read_manifest()
-    if man is None:
-        # _apply_setup just wrote a valid manifest; if it's unreadable now it was corrupted
-        # externally. Do NOT overwrite it with a tailscale-only stub (that would drop the
-        # runtime/service revert fields). Tell the user to tear down manually.
+
+    # Serve is live and already covered by the pre-recorded teardown; upgrade the block to the
+    # full payload (with the resolved tailnet URL) now that we have it. If this write fails the
+    # pre-recorded teardown still stands, so uninstall keeps working — just warn, never crash.
+    if not _set_manifest_tailscale(out["block"]):
         _err(
-            "Tailscale Serve started, but install.json is unreadable so it was not recorded "
-            f"for revert. Tear it down manually with: {' '.join(tailscale.teardown_command())}"
+            "Tailscale Serve started, but the URL could not be written to install.json "
+            "(unreadable or not writable). `tokdash uninstall` still reverts it; if it misses, "
+            f"run: {' '.join(tailscale.teardown_command())}"
         )
-        return
-    man["tailscale_serve"] = out["block"]
-    manifest.write_manifest(man)
     result["tailscale_serve"] = out["block"]
     result.setdefault("changed", []).append("tailscale-serve")
     remote_url = out.get("url") or (out.get("block") or {}).get("url")

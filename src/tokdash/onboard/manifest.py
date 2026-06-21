@@ -56,8 +56,16 @@ def write_manifest(data: Dict[str, Any], path: Optional[Path] = None) -> Path:
     p = path or paths.manifest_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except OSError:
+        # Don't leave a half-written ``install.json.tmp`` sidecar behind on failure.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     return p
 
 

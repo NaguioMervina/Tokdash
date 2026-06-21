@@ -257,11 +257,18 @@ curl -s https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/agents/o
 
 ### 状态栏集成（Statusline integration）
 
-本地 API 可为编程 Agent（如 Claude Code）提供实时 token/费用状态栏。把下面这段提示词发给你的 Agent：
+本地 API 可为编程 Agent（如 Claude Code）提供实时 token/费用状态栏。
+
+**开箱即用的模板**位于 [`docs/examples/statusline/`](docs/examples/statusline/)：把其中一个脚本复制到 `~/.claude/scripts/`，再把 `statusLine` 配置块加入 `~/.claude/settings.json` 即可。
+
+- [`statusline-minimal.sh`](docs/examples/statusline/statusline-minimal.sh) → 单行：`[Claude Sonnet 4.6] 📁 myproject | 📊 12.3M ($4.56) today`
+- [`statusline-full.sh`](docs/examples/statusline/statusline-full.sh) → 四行面板，含今日 + 本周合计，以及按工具的 Top-3 明细
+
+两者均为只读、仅本地访问，Tokdash 未运行时会静默隐藏 📊 段。安装与配置见[该目录的 README](docs/examples/statusline/README.md)，端点细节见 [`docs/API.md`](docs/API.md)。
+
+想自己定制？把下面这段提示词发给你的 Agent，并把 [`docs/API.md`](docs/API.md) 一起给它：
 
 > *"I would like to add a statusline item from the tokdash endpoint's API; it should show the total tokens used today."*
-
-再把 [`docs/API.md`](docs/API.md) 作为参考一起给它，剩下的让 Agent 自行接入即可。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-statusline.png" alt="Tokdash 状态栏集成示例" width="900" />

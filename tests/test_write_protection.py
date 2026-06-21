@@ -94,6 +94,19 @@ def test_ipv6_loopback_host():
     assert _deny("PUT", {"host": "[::1]:55423", "x-tokdash-token": api._CSRF_TOKEN}) is None
 
 
+# --- _is_loopback classification -------------------------------------------------
+
+def test_is_loopback_accepts_real_loopback():
+    for addr in ("127.0.0.1", "127.5.6.7", "::1", "[::1]", "localhost", "LOCALHOST"):
+        assert api._is_loopback(addr), addr
+
+
+def test_is_loopback_rejects_spoofed_and_non_loopback():
+    # A prefix check like startswith("127.") accepted these; an IP parse must not.
+    for addr in ("127.0.0.1.evil.com", "127notanip", "0.0.0.0", "::", "10.0.0.1", ""):
+        assert not api._is_loopback(addr), addr
+
+
 # --- /api/csrf-token -----------------------------------------------------------
 
 def test_csrf_token_endpoint_same_origin():

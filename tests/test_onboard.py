@@ -955,6 +955,26 @@ def test_tailscale_parse_serve_status_url():
     assert tailscale.parse_serve_url(status, 55423) == "https://tokdash-node.example.test/tokdash"
 
 
+def test_parse_serve_url_fallback_scopes_to_path():
+    # Status layout where the target line never resolves: the fallback must still scope the
+    # host URL to /tokdash rather than advertising the bare tailnet host root.
+    status = "https://tokdash-node.example.test (tailnet only)\n"
+    assert tailscale.parse_serve_url(status, 55423) == "https://tokdash-node.example.test/tokdash"
+
+
+def test_write_manifest_removes_tmp_on_replace_failure(monkeypatch, tmp_path):
+    target = tmp_path / "install.json"
+
+    def boom(self, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(manifest.Path, "replace", boom)
+    with pytest.raises(OSError):
+        manifest.write_manifest({"schema": 1}, path=target)
+    assert not (tmp_path / "install.json.tmp").exists()  # no half-written sidecar left behind
+    assert not target.exists()
+
+
 def test_uninstall_runs_recorded_tailscale_teardown(fake_systemd, monkeypatch, capsys):
     mid = "tsmark"
     svc = {"type": "systemd-user", "unit": str(paths.systemd_unit_path()), "name": "tokdash",
@@ -1040,6 +1060,79 @@ def test_setup_interactive_tailscale_operator_grant_and_retry(monkeypatch, fake_
     rc = run(["setup", "--service", "systemd"])
     assert rc == 0 and len(attempts) == 2 and granted
     assert manifest.read_manifest()["tailscale_serve"]["configured_by_setup"] is True
+
+
+def test_setup_records_tailscale_teardown_before_activation(monkeypatch, fake_systemd):
+    # The teardown must be in install.json BEFORE `tailscale serve` can activate, so a crash
+    # in the window can never strand an unauthenticated exposure that uninstall can't revert.
+    monkeypatch.setattr(detect, "tailscale_available", lambda: True)
+    seen = {}
+
+    def fake_run_serve(port, **k):
+        man = manifest.read_manifest()
+        seen["pre"] = man["tailscale_serve"]
+        return {"ok": True, "command": ["tailscale", "serve"], "block": tailscale.manifest_block(port), "error": None}
+
+    monkeypatch.setattr(tailscale, "run_serve", fake_run_serve)
+    replies = iter(["y", "y"])  # confirm setup ; run tailscale
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+    rc = run(["setup", "--service", "systemd"])
+    assert rc == 0
+    assert seen["pre"]["configured_by_setup"] is True
+    assert seen["pre"]["teardown_command"][-1] == "off"
+
+
+def test_setup_tailscale_failure_does_not_strand_record(monkeypatch, fake_systemd):
+    # A failed `tailscale serve` (nothing exposed) must reconcile the pre-record back out so
+    # uninstall has no stale teardown to run; setup still succeeds (Tailscale is optional).
+    monkeypatch.setattr(detect, "tailscale_available", lambda: True)
+    monkeypatch.setattr(
+        tailscale, "run_serve",
+        lambda port, **k: {"ok": False, "command": ["tailscale", "serve"], "block": None, "error": "boom"},
+    )
+    replies = iter(["y", "y"])  # confirm setup ; run tailscale
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+    rc = run(["setup", "--service", "systemd"])
+    assert rc == 0
+    assert manifest.read_manifest()["tailscale_serve"]["configured_by_setup"] is False
+
+
+def test_setup_tailscale_final_url_write_failure_does_not_crash(monkeypatch, fake_systemd, capsys):
+    # Serve succeeds but the post-success manifest write (the one carrying the resolved URL)
+    # fails. Setup must NOT crash with a traceback: the pre-recorded teardown already covers
+    # revert, so the user gets the manual teardown hint and uninstall still works.
+    monkeypatch.setattr(detect, "tailscale_available", lambda: True)
+    monkeypatch.setattr(
+        tailscale, "run_serve",
+        lambda port, **k: {
+            "ok": True,
+            "command": ["tailscale", "serve"],
+            "block": tailscale.manifest_block(port, url="https://tokdash-node.example.test/tokdash"),
+            "url": "https://tokdash-node.example.test/tokdash",
+            "error": None,
+        },
+    )
+    real_write = manifest.write_manifest
+
+    def failing_write(data, path=None):
+        # Fail only on the write carrying the resolved URL (post-success); the base manifest
+        # and the url=None pre-record must still go through.
+        if (data.get("tailscale_serve") or {}).get("url"):
+            raise OSError("disk full")
+        return real_write(data, path)
+
+    monkeypatch.setattr(manifest, "write_manifest", failing_write)
+    replies = iter(["y", "y"])  # confirm setup ; run tailscale
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(replies))
+
+    rc = run(["setup", "--service", "systemd"])
+    assert rc == 0  # no traceback
+    assert "uninstall" in capsys.readouterr().err  # manual teardown hint surfaced
+    # The pre-recorded teardown survived, so uninstall can still revert the exposure.
+    man = manifest.read_manifest()
+    assert man["tailscale_serve"]["configured_by_setup"] is True
+    assert man["tailscale_serve"]["teardown_command"][-1] == "off"
+    assert man["tailscale_serve"]["url"] is None  # the URL write is exactly what failed
 
 
 def test_auto_never_runs_tailscale_but_prints_hint(monkeypatch, fake_systemd):
