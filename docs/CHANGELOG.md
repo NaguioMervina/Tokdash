@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+## 1.0.6 - 2026-07-01
+
+### Added
+- Added Claude Sonnet 5 introductory API pricing (`claude-sonnet-5`, plus `sonnet-5`, `sonnet5`, and dated aliases) to the bundled pricing database.
+
+### Fixed
+- Manual dashboard Refresh now forces `/api/usage` recomputation while preserving cache backpressure protections, and the button surfaces refreshing, cached, busy, and failure states instead of appearing to do nothing on cache hits.
+- Successful automatic refreshes now clear stale transient manual-refresh labels, and the failure button copy now prompts a retry.
+
 ## 1.0.5 - 2026-07-01
 
 ### Added
