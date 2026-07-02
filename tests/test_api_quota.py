@@ -114,6 +114,7 @@ def test_try_begin_quota_refresh_reserves_atomically(monkeypatch):
     # First caller reserves the slot (remaining == 0); an immediate second caller is blocked
     # (remaining > 0). The check-and-reserve happen in one critical section, so two racing
     # refreshes can never both proceed.
+    monkeypatch.setattr(api.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(api, "_quota_last_refresh_monotonic", 0.0)
     assert api._try_begin_quota_refresh() == 0.0
     assert api._try_begin_quota_refresh() > 0
@@ -122,6 +123,7 @@ def test_try_begin_quota_refresh_reserves_atomically(monkeypatch):
 def test_quota_refresh_failure_releases_cooldown(monkeypatch):
     # A refresh that errors after reserving the slot must roll the reservation back —
     # otherwise a 500 locks the user out for the full cooldown with nothing to show for it.
+    monkeypatch.setattr(api.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(api, "_quota_last_refresh_monotonic", 0.0)
     monkeypatch.setattr(api, "_quota_prev_refresh_monotonic", 0.0)
     monkeypatch.setattr(
