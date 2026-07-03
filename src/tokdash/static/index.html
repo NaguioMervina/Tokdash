@@ -2616,7 +2616,7 @@
     function getDefaultStyleTheme() {
       const stored = localStorage.getItem('tokdash-style-theme');
       if (VALID_STYLE_THEMES.includes(stored)) return stored;
-      return 'elevated';
+      return 'paper';
     }
 
     function getDefaultTheme() {
@@ -2626,7 +2626,7 @@
     }
 
     function applyStyleTheme(theme) {
-      const normalized = VALID_STYLE_THEMES.includes(theme) ? theme : 'elevated';
+      const normalized = VALID_STYLE_THEMES.includes(theme) ? theme : 'paper';
       document.documentElement.dataset.uiTheme = normalized;
       const select = document.getElementById('styleThemeSelect');
       if (select) select.value = normalized;
@@ -2638,7 +2638,7 @@
     function applyTheme(theme) {
       const dark = theme === 'dark';
       document.documentElement.classList.toggle('dark', dark);
-      const uiTheme = document.documentElement.dataset.uiTheme || 'elevated';
+      const uiTheme = document.documentElement.dataset.uiTheme || 'paper';
       HEAT_COLORS = getHeatColors(uiTheme, dark);
       const themeMeta = document.querySelector('meta[name="theme-color"]');
       if (themeMeta) themeMeta.content = getThemeMetaColor(uiTheme, dark);
@@ -6777,7 +6777,7 @@
     initQuotaVisibilityControls();
 
     document.getElementById('styleThemeSelect').addEventListener('change', (event) => {
-      const next = event.target.value || 'elevated';
+      const next = event.target.value || 'paper';
       localStorage.setItem('tokdash-style-theme', next);
       applyStyleTheme(next);
       rerenderPresentation();

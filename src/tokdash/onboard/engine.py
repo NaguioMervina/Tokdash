@@ -113,14 +113,15 @@ def cmd_setup(opts: Options) -> int:
     ):
         _offer_tailscale(result)
 
-    _maybe_open_dashboard(result, opts, detection)
-
     # Optional quota step (interactive only): per-provider network consent (default No) and
     # the poll interval, mirroring the opt-in update-check consent UX. --auto/--yes/--json and
     # non-tty runs skip it so scripted setup never blocks on a prompt. Runs last so it never
-    # steals input meant for the earlier setup/tailscale confirmations.
+    # steals input meant for the earlier setup/tailscale confirmations. Browser opening happens
+    # after this wizard so the dashboard does not interrupt the remaining terminal questions.
     if result.get("ok") and not opts.auto and not opts.yes and not opts.json and detection["tty"]:
         _quota_setup_wizard()
+
+    _maybe_open_dashboard(result, opts, detection)
 
     _emit_result(result, opts)
     return EXIT_OK if result.get("ok") else EXIT_FAIL

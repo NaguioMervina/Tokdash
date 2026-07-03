@@ -185,6 +185,7 @@ def test_api_endpoints_and_dashboard_smoke(synthetic_api_data):
     assert "/api/quota/consent" in html
     assert "resetCredits" in html
     assert "renderQuotaBucketGroups" in html
+    assert "return 'paper';" in html
     assert "__TOKDASH_BASE_PATH__" not in html
 
     icon_path = api.STATIC_DIR / "icons" / "icon-192.png"

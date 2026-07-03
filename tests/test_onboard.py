@@ -418,6 +418,19 @@ def test_setup_open_dashboard_records_note(monkeypatch):
     assert result["notes"] == ["Opened dashboard in your browser: http://127.0.0.1:55423"]
 
 
+def test_setup_opens_dashboard_after_quota_wizard(monkeypatch, fake_systemd):
+    calls = []
+
+    monkeypatch.setattr(engine, "_print_setup_human_plan", lambda p: None)
+    monkeypatch.setattr(engine, "_confirm", lambda prompt, default=True: True)
+    monkeypatch.setattr(engine, "_offer_tailscale", lambda result: None)
+    monkeypatch.setattr(engine, "_quota_setup_wizard", lambda: calls.append("quota"))
+    monkeypatch.setattr(engine, "_maybe_open_dashboard", lambda result, opts, detection: calls.append("open") or True)
+
+    assert run(["setup", "--service", "systemd"]) == 0
+    assert calls == ["quota", "open"]
+
+
 def test_setup_overwrites_its_own_marked_unit(fake_systemd):
     # Re-running setup is idempotent: an existing *marked* unit is replaced without --force.
     assert run(["setup", "--auto", "--service", "systemd"]) == 0
