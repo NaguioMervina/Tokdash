@@ -70,13 +70,33 @@
 - **PWA 支持**：可作为渐进式 Web 应用安装
 
 <p align="center">
+  <b>总览</b><br />
   <a href="https://tokdash.github.io/demo/">
-    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo.png" alt="Tokdash 仪表盘 — 点击体验在线 Demo" width="900" />
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-overview-cn.png" alt="Tokdash 总览仪表盘 — 点击体验在线 Demo" width="860" />
   </a>
 </p>
 <p align="center">
+  <b>会话详情</b><br />
   <a href="https://tokdash.github.io/demo/">
-    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-stats.png" alt="Tokdash 统计与热力图 — 点击体验在线 Demo" width="900" />
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-session-cn.png" alt="Tokdash 会话详情 — 点击体验在线 Demo" width="720" />
+  </a>
+</p>
+<p align="center">
+  <b>使用热力图</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-heatmap-cn.png" alt="Tokdash 使用热力图 — 点击体验在线 Demo" width="860" />
+  </a>
+</p>
+<p align="center">
+  <b>额度追踪</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-quota-cn.png" alt="Tokdash 额度追踪 — 点击体验在线 Demo" width="860" />
+  </a>
+</p>
+<p align="center">
+  <b>Codex 额度局部放大</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-quota-codex-cn.png" alt="Tokdash Codex 额度局部放大 — 点击体验在线 Demo" width="440" />
   </a>
 </p>
 

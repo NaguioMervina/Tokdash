@@ -72,13 +72,33 @@
 - **PWA support**: installable as a progressive web app
 
 <p align="center">
+  <b>Overview</b><br />
   <a href="https://tokdash.github.io/demo/">
-    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo.png" alt="Tokdash dashboard — click for live demo" width="900" />
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-overview-en.png" alt="Tokdash overview dashboard - click for live demo" width="860" />
   </a>
 </p>
 <p align="center">
+  <b>Session detail</b><br />
   <a href="https://tokdash.github.io/demo/">
-    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-stats.png" alt="Tokdash stats & heatmap — click for live demo" width="900" />
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-session-en.png" alt="Tokdash session detail - click for live demo" width="720" />
+  </a>
+</p>
+<p align="center">
+  <b>Usage heatmap</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-heatmap-en.png" alt="Tokdash usage heatmap - click for live demo" width="860" />
+  </a>
+</p>
+<p align="center">
+  <b>Quota tracking</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-quota-en.png" alt="Tokdash quota tracking - click for live demo" width="860" />
+  </a>
+</p>
+<p align="center">
+  <b>Codex quota close-up</b><br />
+  <a href="https://tokdash.github.io/demo/">
+    <img src="https://raw.githubusercontent.com/JingbiaoMei/Tokdash/main/docs/assets/demo-quota-codex-en.png" alt="Tokdash Codex quota close-up - click for live demo" width="440" />
   </a>
 </p>
 
