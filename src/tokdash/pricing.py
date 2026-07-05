@@ -136,7 +136,21 @@ class PricingDatabase:
     def _strip_common_suffixes(key: str) -> str:
         k = key
         k = re.sub(r"-(latest|stable)$", "", k)
-        k = re.sub(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", "", k)
+        # Trailing release-date snapshots appended by providers. Covers
+        # YYYY-MM-DD, YYYYMMDD (8-digit), YYMMDD (6-digit, e.g.
+        # glm-5-2-260617 -> 2026-06-17) and YYMM year-month (4-digit, e.g.
+        # deepseek-v4-flash-2604 -> 2026-04). Month (and day, where present)
+        # bounds keep arbitrary numeric identifiers that aren't dates from
+        # being stripped. This is safe here because _resolve_pricing tries
+        # exact/normalized keys BEFORE stripped variants, so canonical
+        # version-stamped keys (e.g. mistral-large-2512) keep their own
+        # pricing; only models absent from the DB fall back to their base.
+        k = re.sub(
+            r"-(?:\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"  # YYYY-MM-DD
+            r"|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"      # YYYYMMDD
+            r"|\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"      # YYMMDD
+            r"|\d{2}(?:0[1-9]|1[0-2]))$",                          # YYMM
+            "", k)
         k = re.sub(r"-thinking$", "", k)
         k = re.sub(r"-(high|medium|low)$", "", k)
         # Quantization / precision format suffixes (e.g. qwen3.6-27B-FP8 -> qwen3.6-27b).

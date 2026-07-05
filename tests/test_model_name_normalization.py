@@ -13,6 +13,27 @@ def test_snapshot_and_release_suffix_normalization():
     assert normalize_model_name("google/gemini-3-pro-preview") == "gemini-3-pro"
 
 
+def test_six_digit_date_suffix_normalization():
+    """YYMMDD release snapshots (e.g. glm-5-2-260617 = 2026-06-17) collapse to base."""
+    assert normalize_model_name("volcengine-coding-plan/glm-5-2-260617") == "glm-5.2"
+    assert normalize_model_name("glm-5-2-20260617") == "glm-5.2"
+    assert normalize_model_name("glm-5-2-2026-06-17") == "glm-5.2"
+    # A non-date 6-digit identifier is preserved (month 34 is invalid).
+    assert normalize_model_name("model-123456") == "model-123456"
+
+
+def test_four_digit_suffixes_preserved_for_distinct_grouping():
+    """4-digit YYMM suffixes are NOT stripped by the normalizer.
+
+    Unlike the pricing resolver, this normalizer has no DB access, so it cannot
+    tell a date snapshot (deepseek-v4-flash-2604) from a canonical version
+    stamp (mistral-large-2512). Stripping here would merge distinct priced
+    models in the dashboard's combined view, so they must stay distinct.
+    """
+    assert normalize_model_name("deepseek-v4-flash-2604") == "deepseek-v4-flash-2604"
+    assert normalize_model_name("mistral-large-2512") == "mistral-large-2512"
+    assert normalize_model_name("mistral-large-2407") == "mistral-large-2407"
+
 def test_alias_variants_normalization():
     assert normalize_model_name("gemini-3-flash-a") == "gemini-3-flash"
     assert normalize_model_name("google/gemini-3-pro-high") == "gemini-3-pro"

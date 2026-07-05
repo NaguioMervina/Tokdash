@@ -10,7 +10,7 @@ def normalize_model_name(name: str) -> str:
     3. Strip known vendor prefixes (e.g. ``antigravity-``).
     4. Replace whitespace/underscores with hyphens; collapse repeated hyphens.
     5. Strip trailing release noise: ``-latest``, ``-stable``, ``-preview``,
-       ``-experimental``, ``-exp``, ``-YYYY-MM-DD``, ``-YYYYMMDD``.
+       ``-experimental``, ``-exp``, ``-YYYY-MM-DD``, ``-YYYYMMDD``, ``-YYMMDD``.
     6. Strip ``-thinking`` suffix to unify thinking/non-thinking variants.
     7. Apply explicit alias map (e.g. ``gemini-3-pro-high`` → ``gemini-3-pro``,
        ``claude-3-5-sonnet`` → ``claude-3.5-sonnet``, ``k2p5`` / ``k2-5`` → ``k2.5``).
@@ -36,7 +36,20 @@ def normalize_model_name(name: str) -> str:
 
     n = re.sub(r"-(latest|stable)$", "", n)
     n = re.sub(r"-(preview|exp|experimental)(?:-[\w\d]+)?$", "", n)
-    n = re.sub(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", "", n)
+    # Trailing release-date snapshots: YYYY-MM-DD, YYYYMMDD, YYMMDD (e.g.
+    # glm-5-2-260617 -> 2026-06-17). Month/day bounds avoid stripping
+    # arbitrary 6-digit identifiers that are not dates.
+    # NOTE: 4-digit YYMM is intentionally NOT stripped here. Unlike the
+    # pricing resolver, this normalizer has no DB access, so it cannot tell a
+    # date snapshot (deepseek-v4-flash-2604) from a canonical version stamp
+    # (mistral-large-2512, qwen3-235b-a22b-2507) and would wrongly merge
+    # distinct priced models in the dashboard's combined view. The pricing
+    # resolver handles YYMM safely via exact-match-first fallback.
+    n = re.sub(
+        r"-(?:\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"  # YYYY-MM-DD
+        r"|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"      # YYYYMMDD
+        r"|\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))$",   # YYMMDD
+        "", n)
     n = re.sub(r"-(high|medium|low)$", "", n)
     
     # Strip -thinking suffix to combine thinking/non-thinking variants

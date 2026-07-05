@@ -2972,8 +2972,18 @@
       n = n.replace(/[\s_]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
       n = n.replace(/-(latest|stable)$/, '');
       n = n.replace(/-(preview|exp|experimental)(?:-[\w\d]+)?$/, '');
-      n = n.replace(/-(\d{4}-\d{2}-\d{2}|\d{8})$/, '');
-      
+      // Trailing release-date snapshots: YYYY-MM-DD, YYYYMMDD, YYMMDD
+      // (e.g. glm-5-2-260617 -> 2026-06-17). Month/day bounds avoid stripping
+      // arbitrary 6-digit identifiers that are not dates. Must stay in sync
+      // with backend model_normalization.normalize_model_name. 4-digit YYMM is
+      // intentionally excluded here too: it would merge version stamps like
+      // mistral-large-2512 in the client-side grouping (the pricing resolver,
+      // which is DB-aware, is the only place 4-digit YYMM stripping is safe).
+      n = n.replace(/-(?:\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])|\d{4}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])|\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))$/, '');
+
+      // Strip effort-level suffixes (high/medium/low) to unify variants
+      n = n.replace(/-(high|medium|low)$/, '');
+
       // Strip -thinking suffix to combine thinking/non-thinking variants
       n = n.replace(/-thinking$/, '');
 
@@ -2981,12 +2991,15 @@
         'gemini-3-pro-high': 'gemini-3-pro',
         'gemini-3-pro-low': 'gemini-3-pro',
         'gemini-3-pro-preview': 'gemini-3-pro',
+        'gemini-3-flash-a': 'gemini-3-flash',
         'o3-mini-high': 'o3-mini',
         'o3-mini-low': 'o3-mini',
         'claude-3-5-sonnet': 'claude-3.5-sonnet',
         'claude-3-7-sonnet': 'claude-3.7-sonnet',
         'k2p5': 'k2.5',
         'k2-5': 'k2.5',
+        'k2p6': 'k2.6',
+        'k2-6': 'k2.6',
       };
       n = alias[n] || n;
       
@@ -3000,6 +3013,19 @@
       if (n.startsWith('opus') || n.startsWith('sonnet')) {
         if (!n.startsWith('claude-')) {
           n = 'claude-' + n;
+        }
+      }
+
+      // Kimi variants: k2p5/k2p6 vs k2.5/k2.6 vs kimi-k2.x
+      n = n.replace(/k2(?:p|-)([56])/g, 'k2.$1');
+      if (n === 'k2.5' || n === 'kimi2.5' || n === 'kimi-2.5' || n === 'kimi-k2.5') {
+        n = 'kimi-k2.5';
+      } else if (n === 'k2.6' || n === 'kimi2.6' || n === 'kimi-2.6' || n === 'kimi-k2.6') {
+        n = 'kimi-k2.6';
+      } else if (n.startsWith('kimi')) {
+        const m = n.match(/(?:k?2\.|k2p|k2-)([56])/);
+        if (m) {
+          n = 'kimi-k2.' + m[1];
         }
       }
 
