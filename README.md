@@ -145,6 +145,9 @@ service manager is available, it records setup state and prints foreground run g
 uses localhost-first defaults, does not require `sudo` for the local service, and keeps your
 usage history unless you later uninstall with `--purge`.
 
+To expose the dashboard explicitly on all network interfaces with writes disabled, run
+`tokdash setup --bind 0.0.0.0`; review the [remote-access guide](docs/REMOTE_ACCESS.md) first.
+
 For a non-interactive setup from an agent, script, or bundle:
 
 ```bash
@@ -218,29 +221,14 @@ instead keep the pipx runtime and upgrade with `tokdash update` or `pipx upgrade
 
 ### Remote access
 
-Tokdash stays loopback-bound by default. For remote access, prefer:
+Tokdash stays loopback-bound by default. Interactive `tokdash setup` can configure Tailscale
+Serve after explicit confirmation, providing private HTTPS read access from Windows or another
+tailnet device. Use SSH forwarding when you need authenticated write access. An explicit
+`--bind 0.0.0.0` provides read-only network access but exposes the unauthenticated dashboard on
+every reachable interface.
 
-- interactive `tokdash setup`, which can offer an explicit Tailscale Serve step when available,
-- SSH forwarding: `ssh -L 55423:127.0.0.1:55423 <user>@<host>`.
-
-Some Tailscale installs require operator permission before a non-root user can configure Serve.
-If Tailscale denies the Serve config, the interactive wizard can offer the one-time
-`sudo tailscale set --operator=$USER` step and then retry `tailscale serve`. Tokdash uses
-the `/tokdash` path on your tailnet host, so it does not claim the domain root if you already
-serve other tools there. After Serve succeeds, setup prints the exact
-`https://...ts.net/tokdash` URL to open from your tailnet.
-
-Tailscale Serve is read-only for mutating dashboard/API actions because proxied requests fail
-Tokdash's loopback write gate. Use SSH forwarding when you need trusted remote writes.
-
-**Tailscale on Windows:** the Windows Tailscale client installs both a GUI and a `tailscale`
-CLI, and `tailscale serve` works the same way from PowerShell/cmd once the client is
-running. Native Windows support has initial CI and smoke-test coverage, but the
-Tailscale Serve + native Windows combination has not yet been validated end to end
-against Tokdash, so treat that specific path as experimental until confirmed.
-
-Binding Tokdash directly to `0.0.0.0` is possible but not recommended because the local API is
-not an internet-facing authenticated service.
+See **[`docs/REMOTE_ACCESS.md`](docs/REMOTE_ACCESS.md)** for setup commands, WSL2 guidance,
+access URLs, write behavior, and security trade-offs.
 
 ### Foreground fallback
 
@@ -336,25 +324,9 @@ tokdash db resync --pretty
 tokdash db watch --pretty
 ```
 
-Remote access through Tailscale Serve:
-
-```bash
-tokdash setup
-# When the wizard offers Tailscale Serve, confirm it.
-# Setup prints the exact https://...ts.net/tokdash URL after Serve succeeds.
-```
-
-If you manage Tailscale yourself after setup has started Tokdash on the default port:
-
-```bash
-tailscale serve --bg --https=443 --set-path=/tokdash http://127.0.0.1:55423
-```
-
-Open `https://<machine>.<tailnet>.ts.net/tokdash`. Stop that manual Serve rule with
-`tailscale serve --https=443 --set-path=/tokdash off`. `tokdash uninstall` only reverts
-Tailscale Serve rules that the setup wizard created and recorded. Tailscale Serve remains
-read-only for mutating dashboard/API actions; use SSH forwarding when you need trusted remote
-writes.
+For remote access through Tailscale Serve, SSH forwarding, or an explicit network bind, see
+[`docs/REMOTE_ACCESS.md`](docs/REMOTE_ACCESS.md). Interactive `tokdash setup` can configure and
+record the Tailscale Serve rule after you opt in.
 
 By default `tokdash serve` opens the dashboard in your browser once on startup. Pass `--no-open` to disable this (it is also skipped automatically in headless/SSH environments and in the background service templates).
 
@@ -363,7 +335,7 @@ By default `tokdash serve` opens the dashboard in your browser once on startup. 
 - **No telemetry**: Tokdash does not intentionally send your data anywhere.
 - **Local parsing**: usage is computed from local session files (see [supported clients](docs/SUPPORTED_CLIENTS.md)).
 - **Optional quota polling**: the Quota tab is local-only by default. Per-provider API polling can be enabled from the tab or with `tokdash quota consent`; it uses your local CLI credentials only to call that provider's own quota endpoint, and stores responses in the local usage SQLite DB.
-- **Server exposure**: Tokdash binds to `127.0.0.1` by default. Prefer Tailscale Serve or SSH tunneling for remote access; avoid `--bind 0.0.0.0` unless you understand it listens on all interfaces and have firewall/auth in place. Tailscale Serve is read-only for write endpoints by design because proxied requests fail Tokdash's loopback write gate; use SSH forwarding when you need authenticated remote writes.
+- **Server exposure**: Tokdash binds to `127.0.0.1` by default. Tailscale Serve provides private read-only access, SSH forwarding provides authenticated write access, and `--bind 0.0.0.0` explicitly exposes unauthenticated reads on every interface. See the [remote-access guide](docs/REMOTE_ACCESS.md).
 
 ### Quota tracking (optional)
 
