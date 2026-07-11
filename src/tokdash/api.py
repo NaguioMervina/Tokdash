@@ -222,46 +222,6 @@ def _is_loopback(addr: str) -> bool:
         return False
 
 
-_wsl_ip_cache: Optional[str] = None
-
-
-def _is_wsl() -> bool:
-    """Detect if running inside WSL (Windows Subsystem for Linux)."""
-    try:
-        version = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
-        return "microsoft" in version or "wsl" in version
-    except OSError:
-        return False
-
-
-def _wsl_host_ip() -> Optional[str]:
-    """Return the WSL instance's IP address (as seen by Windows), or None if not in WSL.
-
-    In WSL2, Windows accesses the WSL network via the instance IP (e.g. 172.x.x.x).
-    This IP changes on reboot, so we detect it at startup and cache it.
-    """
-    global _wsl_ip_cache
-    if _wsl_ip_cache is not None:
-        return _wsl_ip_cache or None
-    if not _is_wsl():
-        _wsl_ip_cache = ""
-        return None
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["hostname", "-I"], capture_output=True, text=True, timeout=3
-        )
-        for part in result.stdout.split():
-            candidate = part.strip()
-            if candidate and candidate != "127.0.0.1":
-                _wsl_ip_cache = candidate
-                return candidate
-    except Exception:
-        pass
-    _wsl_ip_cache = ""
-    return None
-
-
 def _effective_bind() -> str:
     # serve() sets app.state before uvicorn.run; fall back to env, else "" (fail closed).
     return getattr(app.state, "bind", None) or os.environ.get("TOKDASH_HOST", "")
@@ -288,11 +248,6 @@ def _host_allowlist(port: int) -> "set[str]":
         allow.add(f"{host}:{port}")
         if port == 80:
             allow.add(host)
-    # In WSL2, Windows accesses the WSL instance via its IP (e.g. 172.x.x.x).
-    # Allow that IP so the CSRF token and write endpoints work from Windows.
-    wsl_ip = _wsl_host_ip()
-    if wsl_ip:
-        allow.add(f"{wsl_ip}:{port}")
     return allow
 
 
@@ -305,11 +260,6 @@ def _origin_allowlist(port: int) -> "set[str]":
         allow.add(f"http://{host}:{port}")
         if port == 80:
             allow.add(f"http://{host}")
-    # In WSL2, Windows accesses the WSL instance via its IP (e.g. 172.x.x.x).
-    # Allow that origin so the CSRF token and write endpoints work from Windows.
-    wsl_ip = _wsl_host_ip()
-    if wsl_ip:
-        allow.add(f"http://{wsl_ip}:{port}")
     return allow
 
 
@@ -341,20 +291,6 @@ def _origin_denied(headers, origin_allow: "set[str]") -> Optional[str]:
     return None
 
 
-def _is_loopback_or_wsl(addr: str) -> bool:
-    """Check if addr is loopback, 0.0.0.0 (all-interfaces), or the WSL instance IP."""
-    if _is_loopback(addr):
-        return True
-    # 0.0.0.0 means "listen on all interfaces" — safe in WSL where the only
-    # non-loopback route in is via the WSL IP we already allowlist.
-    if addr.strip() in ("0.0.0.0", "::", "[::]"):
-        return _is_wsl()
-    wsl_ip = _wsl_host_ip()
-    if wsl_ip and addr.strip() == wsl_ip:
-        return True
-    return False
-
-
 def mutation_denied_reason(
     method: str, headers, *, bind: Optional[str] = None, port: Optional[int] = None
 ) -> Optional[str]:
@@ -366,7 +302,7 @@ def mutation_denied_reason(
     if method.upper() not in _MUTATING_METHODS:
         return None
     bind = bind if bind is not None else _effective_bind()
-    if not _is_loopback_or_wsl(bind):
+    if not _is_loopback(bind):
         return "Tokdash is not bound to loopback; write endpoints are disabled. Bind 127.0.0.1 to make changes."
     port = port if port is not None else _effective_port()
     allow = _host_allowlist(port)
@@ -1240,7 +1176,7 @@ async def get_csrf_token(request: Request) -> Dict[str, str]:
     port = _effective_port()
     host = (request.headers.get("host") or "").strip().lower()
     if (
-        not _is_loopback_or_wsl(_effective_bind())
+        not _is_loopback(_effective_bind())
         or host not in _host_allowlist(port)
         or _origin_denied(request.headers, _origin_allowlist(port))
     ):
