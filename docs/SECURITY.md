@@ -37,7 +37,9 @@ as non-loopback):
   `X-Tokdash-Token`. The dashboard fetches it from `GET /api/csrf-token` (itself loopback/
   same-origin gated, so another localhost port can't read it).
 
-For remote access, prefer `tailscale serve` or `ssh -L` forwarding over a non-loopback bind.
+For setup commands and a comparison of remote-access methods, see
+[`REMOTE_ACCESS.md`](REMOTE_ACCESS.md). Prefer Tailscale Serve or `ssh -L` forwarding over a
+non-loopback bind.
 The two differ for **writes**: **Tailscale Serve** requests are effectively read-only (their
 foreign `Host` / `https` `Origin` fail the allowlist), but an **`ssh -L` forward to
 `localhost`/`127.0.0.1` preserves a loopback `Host`, so writes from the SSH-authenticated user

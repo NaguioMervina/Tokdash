@@ -124,24 +124,14 @@ Defaults are loopback-first: `127.0.0.1:55423`. `--auto` is **strictly local-onl
 refuses a non-loopback bind. The local API is unauthenticated, so **write endpoints are
 automatically disabled unless the server is bound to loopback** (see `docs/SECURITY.md`).
 
-For remote access:
+Interactive `tokdash setup` can configure Tailscale Serve after explicit confirmation and
+record the exact targeted teardown for `tokdash uninstall`. `--auto` never exposes the service;
+it only prints remote-access guidance. SSH forwarding supports authenticated write access, while
+an explicit non-loopback bind remains read-only.
 
-- **Tailscale Serve** — the interactive `tokdash setup` (not `--auto`) offers to run
-  `tailscale serve --bg --https=443 --set-path=/tokdash http://127.0.0.1:<port>` for you
-  after explicit confirmation, and records the exact teardown so `tokdash uninstall` reverts
-  it (it runs the targeted `off`, never `tailscale serve reset`).
-  If Tailscale denies Serve configuration for your user, the wizard can offer the one-time
-  `sudo tailscale set --operator=$USER` operator grant and then retry `tailscale serve`.
-  The `/tokdash` path avoids claiming the tailnet host's domain root. After Serve succeeds,
-  setup prints the exact `https://...ts.net/tokdash` URL to open from your tailnet.
-  `--auto` never exposes anything; it only prints the command as info.
-- **SSH** — `ssh -L <port>:127.0.0.1:<port> <host>`.
-
-The server stays loopback-bound either way, but the two differ for **writes**: a Tailscale
-Serve request carries the tailnet hostname as `Host` (and an `https` `Origin`), so it fails the
-loopback allowlist and is effectively read-only. An `ssh -L` forward to `localhost` preserves a
-loopback `Host`, so the SSH-authenticated user keeps write access by design — SSH is the
-authentication layer there. See `docs/SECURITY.md` for the full write-protection model.
+See [`REMOTE_ACCESS.md`](REMOTE_ACCESS.md) for commands, URLs, WSL2 guidance, and the trade-offs
+between Tailscale Serve, SSH forwarding, and wildcard binding. See [`SECURITY.md`](SECURITY.md)
+for the complete write-protection model.
 
 ## `tokdash doctor`
 
